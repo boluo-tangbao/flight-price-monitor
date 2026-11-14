@@ -34,7 +34,7 @@ on:
       platforms:
         description: '平台: fliggy,tuniu,qunar,tongcheng,ctrip'
         required: false
-        default: 'fliggy,tuniu,qunar,tongcheng'
+        default: 'ctrip,fliggy,tuniu,qunar,tongcheng'
       threshold:
         description: '低价提醒阈值（元）'
         required: false
