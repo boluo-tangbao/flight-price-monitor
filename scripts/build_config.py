@@ -11,7 +11,7 @@ def main():
     ap.add_argument("--to-name", required=True)
     ap.add_argument("--dates", required=True)
     ap.add_argument("--return-dates", default="")
-    ap.add_argument("--platforms", default="fliggy,tuniu,qunar,tongcheng")
+    ap.add_argument("--platforms", default="ctrip,fliggy,tuniu,qunar,tongcheng")
     ap.add_argument("--threshold", type=int, default=0)
     ap.add_argument("--serverchan-key", default="")
     ap.add_argument("--output", default="config.yaml")
