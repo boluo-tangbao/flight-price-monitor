@@ -5,131 +5,59 @@ on:
   schedule:
     - cron: '25 8,13,19,0 * * *'
       timezone: 'Asia/Shanghai'
-  workflow_dispatch:
-    inputs:
-      from_code:
-        description: '出发地三字码 (如 LZO)'
-        required: true
-        default: 'LZO'
-      from_name:
-        description: '出发地名称 (如 泸州)'
-        required: true
-        default: '泸州'
-      to_code:
-        description: '目的地三字码 (如 BJS)'
-        required: true
-        default: 'BJS'
-      to_name:
-        description: '目的地名称 (如 北京)'
-        required: true
-        default: '北京'
-      depart_dates:
-        description: '去程日期, 逗号分隔 (如 2026-09-30,2026-10-01)'
-        required: true
-        default: '2026-09-30,2026-10-01,2026-10-02'
-      return_dates:
-        description: '回程日期, 逗号分隔；one_way 时为反向单程，round_trip 时为往返组合'
-        required: false
-        default: '2026-10-06'
-      trip_type:
-        description: 'one_way 或 round_trip（携程含税组合起价）'
-        type: choice
-        options: [one_way, round_trip]
-        default: one_way
-      platforms:
-        description: '平台: fliggy,tuniu,qunar,tongcheng,ctrip'
-        required: false
-        default: 'ctrip,fliggy,tuniu,qunar,tongcheng'
-      threshold:
-        description: '低价提醒阈值（元）'
-        required: false
-        default: '0'
+  workflow_dispatch: {}
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
+
+concurrency:
+  group: flight-monitor-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   monitor:
+    if: github.event_name == 'workflow_dispatch' || vars.FLIGHT_MONITOR_ENABLED == 'true'
     runs-on: ubuntu-latest
-    concurrency:
-      group: flight-monitor-${{ github.ref }}
-      cancel-in-progress: false
+    timeout-minutes: 8
+    env:
+      TZ: Asia/Shanghai
     steps:
+      - name: Require completed cloud and baggage acceptance
+        env:
+          ENABLED: ${{ vars.FLIGHT_MONITOR_ENABLED }}
+        run: |
+          if [ "$ENABLED" != "true" ]; then
+            echo "Cloud and two-leg baggage verification pending; no airline request sent."
+            exit 1
+          fi
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          python -m playwright install chromium --with-deps
-
-      - name: Build config from workflow_dispatch or defaults
-        run: |
-          python scripts/build_config.py \
-            --from-code "${{ github.event.inputs.from_code || 'LZO' }}" \
-            --from-name "${{ github.event.inputs.from_name || '泸州' }}" \
-            --to-code "${{ github.event.inputs.to_code || 'BJS' }}" \
-            --to-name "${{ github.event.inputs.to_name || '北京' }}" \
-            --dates "${{ github.event.inputs.depart_dates || '2026-09-30,2026-10-01,2026-10-02' }}" \
-            --return-dates "${{ github.event.inputs.return_dates || '2026-10-06' }}" \
-            --trip-type "${{ github.event.inputs.trip_type || 'one_way' }}" \
-            --platforms "${{ github.event.inputs.platforms || 'fliggy,tuniu,qunar,tongcheng' }}" \
-            --threshold "${{ github.event.inputs.threshold || '0' }}" \
-            --output config.yaml
-
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install chromium --with-deps
       - uses: actions/cache/restore@v4
         with:
           path: data/prices.db
-          key: flight-db-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: flight-db-${{ github.ref_name }}-
-
-      - name: Run price monitor (one round)
+          key: flight-db-v2-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: flight-db-v2-${{ github.ref_name }}-
+      - name: Query configured Shanghai Osaka round trip once
         env:
           SERVERCHAN_SEND_KEY: ${{ secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY }}
-        run: python main.py --once
-        timeout-minutes: 15
-
-      - name: Export collection status
+        run: python main.py -c config.monitor.yaml --once
+        timeout-minutes: 3
+      - name: Export status
         if: always()
-        run: python scripts/collection_status.py
-
+        run: |
+          if [ -f data/prices.db ]; then python scripts/collection_status.py; fi
       - uses: actions/cache/save@v4
         if: always()
         with:
           path: data/prices.db
-          key: flight-db-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
-
+          key: flight-db-v2-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: collection-status
           path: data/collection-status.json
-
-      - name: Export latest results to JSON
-        run: |
-          mkdir -p docs/data
-          python scripts/export_results.py \
-            --db data/prices.db \
-            --out docs/data/latest.json
-
-      - name: Render HTML report
-        run: |
-          python scripts/render_report.py \
-            --results-file docs/data/latest.json \
-            --out-dir docs/data
-
-      - name: Commit data & report
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/data/
-          git diff --staged --quiet || git commit -m "chore: update price data $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
