@@ -6,6 +6,23 @@ from .models import FlightPrice, Route
 
 
 class Alerter:
+    def check_round_trip(self, route, quote):
+        if not route.alert_threshold or not self.notifier:
+            return
+        key = (f"RT:{route.from_code}:{route.to_code}:{quote.depart_date}:"
+               f"{quote.return_date}:{quote.currency}:{quote.price_basis}")
+        if quote.price > route.alert_threshold:
+            self.storage.clear_alert_state(key)
+            return
+        last = self.storage.get_alert_state(key)
+        should_push, _ = self._should_push(quote.price, last)
+        if should_push and self.notifier.send(
+                f"往返含税起价 {route.from_name}↔{route.to_name} ¥{quote.price:.0f}",
+                f"去程 {quote.depart_date} / 回程 {quote.return_date}\n\n"
+                f"平台组合起价：CNY {quote.price:.0f}（1成人经济舱）。"
+                f"返程具体航班尚未选定，支付价格请到平台核实。\n\n[查看往返]({quote.source_url})"):
+            self.storage.set_alert_state(key, quote.price)
+
     def __init__(self, logger: logging.Logger, notifier=None, storage=None,
                  push_drop_min: float = 30, push_rise_min: float = 50):
         """

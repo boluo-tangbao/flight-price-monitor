@@ -19,6 +19,10 @@ class CtripCrawler(BaseCrawler):
     name = "ctrip"
     use_mobile = True  # 移动端 H5
 
+    def fetch_round_trip(self, from_city, to_city, date, return_date):
+        from .ctrip_roundtrip import fetch_round_trip
+        return fetch_round_trip(self, from_city, to_city, date, return_date)
+
     # 携程 H5 机票单程列表（taro 版，用户提供的真实入口）
     URL_TPL = ("https://m.ctrip.com/html5/flight/taro/first?from=inner"
                "&tripType=ONE_WAY"

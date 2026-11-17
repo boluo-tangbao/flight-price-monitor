@@ -30,3 +30,13 @@ class Route:
     to_name: str
     dates: list
     alert_threshold: float = 0
+    trip_type: str = "one_way"
+    return_dates: list = field(default_factory=list)
+
+
+@dataclass
+class RoundTripQuote(FlightPrice):
+    return_date: str = ""
+    currency: str = "CNY"
+    price_basis: str = "product_round_trip_tax"
+    source_url: str = ""

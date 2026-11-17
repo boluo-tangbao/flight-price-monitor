@@ -15,7 +15,14 @@ def main():
     ap.add_argument("--threshold", type=int, default=0)
     ap.add_argument("--serverchan-key", default="")
     ap.add_argument("--output", default="config.yaml")
+    ap.add_argument("--overwrite", action="store_true", help="Explicitly replace an existing config")
+    ap.add_argument("--trip-type", choices=["one_way", "round_trip"], default="one_way")
     args = ap.parse_args()
+    if Path(args.output).exists() and not args.overwrite:
+        print("Existing config preserved; use --overwrite to replace explicitly")
+        return
+    if args.trip_type == "round_trip" and not args.return_dates.strip():
+        ap.error("round_trip requires --return-dates")
 
     depart = [d.strip() for d in args.dates.split(",") if d.strip()]
     returns = [d.strip() for d in args.return_dates.split(",") if d.strip()]
@@ -32,7 +39,11 @@ def main():
     lines += [f'      - "{d}"' for d in depart]
     lines.append(f"    alert_threshold: {args.threshold}")
 
-    if returns:
+    if args.trip_type == "round_trip":
+        lines += ["    trip_type: round_trip", "    return_dates:"]
+        lines += [f'      - "{d}"' for d in returns]
+
+    if returns and args.trip_type == "one_way":
         lines += [
             "",
             f"  - from: {args.to_code}",

@@ -1,0 +1,34 @@
+# 独立示例；不会被自动加载，不启动监控。日期只是演示，请自行修改。
+routes:
+  - from: SHA
+    from_name: 上海全部机场
+    to: TYO
+    to_name: 东京全部机场
+    dates: ["2026-12-01"]
+    trip_type: round_trip
+    return_dates: ["2026-12-08"]
+    alert_threshold: 0
+platforms: [ctrip]
+schedule:
+  interval_minutes: 480
+  run_on_start: true
+crawler:
+  headless: false
+  timeout_seconds: 35
+  delay_min: 5
+  delay_max: 15
+  user_data_dir: user_data
+output:
+  db_path: data/prices.db
+  log_path: logs/monitor.log
+health:
+  enabled: true
+  failure_threshold: 3
+  cooldown_hours: 6
+  quiet_start: "23:00"
+  quiet_end: "07:00"
+notifier:
+  serverchan:
+    enabled: false
+    send_key: ""
+# 用环境变量 SERVERCHAN_SEND_KEY 注入凭据；不要提交 SendKey。

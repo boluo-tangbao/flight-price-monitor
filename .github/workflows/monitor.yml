@@ -28,9 +28,14 @@ on:
         required: true
         default: '2026-09-30,2026-10-01,2026-10-02'
       return_dates:
-        description: '回程日期, 逗号分隔 (可选)'
+        description: '回程日期, 逗号分隔；one_way 时为反向单程，round_trip 时为往返组合'
         required: false
         default: '2026-10-06'
+      trip_type:
+        description: 'one_way 或 round_trip（携程含税组合起价）'
+        type: choice
+        options: [one_way, round_trip]
+        default: one_way
       platforms:
         description: '平台: fliggy,tuniu,qunar,tongcheng,ctrip'
         required: false
@@ -48,6 +53,9 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    concurrency:
+      group: flight-monitor-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,14 +80,38 @@ jobs:
             --to-name "${{ github.event.inputs.to_name || '北京' }}" \
             --dates "${{ github.event.inputs.depart_dates || '2026-09-30,2026-10-01,2026-10-02' }}" \
             --return-dates "${{ github.event.inputs.return_dates || '2026-10-06' }}" \
+            --trip-type "${{ github.event.inputs.trip_type || 'one_way' }}" \
             --platforms "${{ github.event.inputs.platforms || 'fliggy,tuniu,qunar,tongcheng' }}" \
             --threshold "${{ github.event.inputs.threshold || '0' }}" \
-            --serverchan-key "${{ secrets.SERVERCHAN_KEY }}" \
             --output config.yaml
 
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/prices.db
+          key: flight-db-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: flight-db-${{ github.ref_name }}-
+
       - name: Run price monitor (one round)
+        env:
+          SERVERCHAN_SEND_KEY: ${{ secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY }}
         run: python main.py --once
         timeout-minutes: 15
+
+      - name: Export collection status
+        if: always()
+        run: python scripts/collection_status.py
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/prices.db
+          key: flight-db-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: collection-status
+          path: data/collection-status.json
 
       - name: Export latest results to JSON
         run: |

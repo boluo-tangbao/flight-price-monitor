@@ -1,5 +1,9 @@
 # ✈️ FlightRadar — 中国多平台机票价格监控
 
+本地增量版本：新增携程城市级往返含税组合起价和按查询持久化的采集健康记录。
+接入范围、配置、验证与限制见 [接入说明](docs/ROUNDTRIP_HEALTH.md)。
+`config.roundtrip.example.yaml` 为独立示例，现有配置不会被自动替换。
+
 <div align="center">
 
 **自动监控携程 / 飞猪 / 去哪儿 / 同程 / 途牛，每天多轮比价，降价微信提醒。**
