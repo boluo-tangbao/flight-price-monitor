@@ -1,0 +1,32 @@
+name: Ctrip session acceptance
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: ctrip-session-acceptance
+  cancel-in-progress: false
+jobs:
+  authenticated-once:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    environment: ctrip-cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m playwright install chromium --with-deps
+      - name: One authenticated query without retries or notifications
+        env:
+          CTRIP_STORAGE_STATE_B64: ${{ secrets.CTRIP_STORAGE_STATE_B64 }}
+        run: python scripts/cloud_acceptance.py --authenticated
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ctrip-session-acceptance
+          path: data/cloud-acceptance.json

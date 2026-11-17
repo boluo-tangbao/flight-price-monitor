@@ -1,0 +1,2 @@
+# Local upload helper only; not needed in the Actions runner.
+PyNaCl>=1.5.0

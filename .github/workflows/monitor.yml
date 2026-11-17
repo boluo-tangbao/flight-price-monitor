@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   monitor:
+    environment: ctrip-cloud
     if: github.event_name == 'workflow_dispatch' || vars.FLIGHT_MONITOR_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -44,6 +45,7 @@ jobs:
           restore-keys: flight-db-v2-${{ github.ref_name }}-
       - name: Query configured Shanghai Osaka round trip once
         env:
+          CTRIP_STORAGE_STATE_B64: ${{ secrets.CTRIP_STORAGE_STATE_B64 }}
           SERVERCHAN_SEND_KEY: ${{ secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY }}
         run: python main.py -c config.monitor.yaml --once
         timeout-minutes: 3

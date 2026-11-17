@@ -86,7 +86,23 @@ class BaseCrawler:
                     options.pop(key)
                 if channel != "chromium":
                     options["channel"] = channel
-            ctx = p.chromium.launch_persistent_context(**options)
+            from core.cloud_session import consume_cloud_state
+            state = consume_cloud_state() if native_pc else None
+            cloud_browser = None
+            if state is not None:
+                launch = {"headless": hl}
+                if "channel" in options:
+                    launch["channel"] = options["channel"]
+                cloud_browser = p.chromium.launch(**launch)
+                try:
+                    ctx = cloud_browser.new_context(storage_state=state,
+                        viewport=options["viewport"], locale=options["locale"],
+                        timezone_id=options["timezone_id"])
+                except Exception:
+                    cloud_browser.close()
+                    raise
+            else:
+                ctx = p.chromium.launch_persistent_context(**options)
             if not native_pc:
                 ctx.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
@@ -98,6 +114,9 @@ class BaseCrawler:
                     ctx.close()
                 except Exception:
                     pass
+
+                if cloud_browser is not None:
+                    cloud_browser.close()
 
     def new_page(self, ctx: BrowserContext) -> Page:
         page = ctx.new_page()

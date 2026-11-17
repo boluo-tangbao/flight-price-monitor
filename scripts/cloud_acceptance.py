@@ -4,6 +4,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import json
 import logging
+import argparse
+import os
 from main import load_config, build_routes
 from crawlers.ctrip import CtripCrawler
 from core.collection import collect
@@ -11,6 +13,14 @@ from core.baggage import baggage_total
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--authenticated", action="store_true")
+    args = parser.parse_args()
+    from core.cloud_session import SECRET_NAME
+    has_state = bool(os.environ.get(SECRET_NAME))
+    if args.authenticated != has_state:
+        print("Login-state mode mismatch; no airline request sent.")
+        return 2
     cfg = load_config("config.monitor.yaml")
     route = build_routes(cfg)[0]
     logger = logging.getLogger("cloud_acceptance")
@@ -22,7 +32,7 @@ def main():
              "flight_no": q.flight_no, "source_url": q.source_url} for q in result.prices]
     ready = any(r["baggage_inclusive_total"] is not None for r in rows)
     report = {"status": result.status, "evidence": result.evidence, "queries": 1,
-              "account_used": False, "notifications_sent": False,
+              "account_used": has_state, "notifications_sent": False,
               "baggage_verified": ready, "quotes": rows}
     out = Path("data/cloud-acceptance.json")
     out.parent.mkdir(exist_ok=True)
