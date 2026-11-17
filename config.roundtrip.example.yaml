@@ -2,12 +2,13 @@
 routes:
   - from: SHA
     from_name: 上海全部机场
-    to: TYO
-    to_name: 东京全部机场
-    dates: ["2026-12-01"]
+    to: OSA
+    to_name: 大阪全部机场
+    dates: ["2027-02-15"]
     trip_type: round_trip
-    return_dates: ["2026-12-08"]
-    alert_threshold: 0
+    return_dates: ["2027-02-22"]
+    alert_threshold: 2800
+    checked_baggage_required: true
 platforms: [ctrip]
 schedule:
   interval_minutes: 480

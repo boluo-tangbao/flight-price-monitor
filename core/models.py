@@ -32,6 +32,7 @@ class Route:
     alert_threshold: float = 0
     trip_type: str = "one_way"
     return_dates: list = field(default_factory=list)
+    checked_baggage_required: bool = False
 
 
 @dataclass
@@ -40,3 +41,4 @@ class RoundTripQuote(FlightPrice):
     currency: str = "CNY"
     price_basis: str = "product_round_trip_tax"
     source_url: str = ""
+    baggage_offer: dict = field(default_factory=dict)

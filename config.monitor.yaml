@@ -1,0 +1,30 @@
+# 正式需求；GitHub 定时仍须通过云端验收后启用仓库变量。
+routes:
+  - from: SHA
+    from_name: 上海全部机场
+    to: OSA
+    to_name: 大阪全部机场
+    dates: ["2027-02-15"]
+    trip_type: round_trip
+    return_dates: ["2027-02-22"]
+    alert_threshold: 2800
+    checked_baggage_required: true
+platforms: [ctrip]
+crawler:
+  headless: true
+  timeout_seconds: 35
+  pc_browser_channel: chromium
+  user_data_dir: user_data
+output:
+  db_path: data/prices.db
+  log_path: logs/monitor.log
+health:
+  enabled: true
+  failure_threshold: 3
+  cooldown_hours: 6
+  quiet_start: "23:00"
+  quiet_end: "07:00"
+notifier:
+  serverchan:
+    enabled: false
+    send_key: ""

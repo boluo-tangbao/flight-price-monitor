@@ -52,6 +52,7 @@ def build_routes(cfg: dict):
             alert_threshold=float(r.get("alert_threshold", 0) or 0),
             trip_type=trip_type,
             return_dates=[str(d) for d in returns],
+            checked_baggage_required=bool(r.get("checked_baggage_required", False)),
         ))
     return routes
 
