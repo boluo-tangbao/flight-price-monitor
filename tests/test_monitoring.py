@@ -62,12 +62,17 @@ class ParserTests(unittest.TestCase):
         quote = fetch_round_trip(c, "SHA", "TYO", DEP, RET)[0]
         self.assertEqual((quote.price, quote.return_date), (1299, RET))
         self.assertTrue(c.use_mobile)
+        self.assertEqual(c.new_page.return_value.goto.call_count, 2)
+        self.assertEqual(c.new_page.return_value.goto.call_args_list[0].args[0], "https://flights.ctrip.com/")
+        c.new_page.return_value.wait_for_timeout.assert_any_call(2500)
 
     def test_captcha_is_not_empty(self):
         c = self.crawler("请完成安全验证")
         with self.assertRaises(FetchFailure) as ctx:
             fetch_round_trip(c, "SHA", "TYO", DEP, RET)
         self.assertEqual(ctx.exception.status, "blocked")
+        self.assertEqual(c.new_page.return_value.goto.call_count, 1)
+        self.assertIn("stage=homepage", str(ctx.exception))
         self.assertTrue(c.use_mobile)
 
     def test_explicit_no_seats(self):

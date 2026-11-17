@@ -5,9 +5,29 @@ Modifications: standalone parser; require a flight number and labelled total.
 import re
 import json
 import time
+from urllib.parse import urlsplit
 
 from core.collection import FetchFailure
 from core.models import RoundTripQuote
+
+
+def check_access(body, url, http_status, stage):
+    """Report only fixed marker names, HTTP status and hostname, never page text/tokens."""
+    host = urlsplit(str(url)).hostname or "unknown"
+    context = f"stage={stage};http={http_status};host={host}"
+    if http_status in (403, 429):
+        raise FetchFailure("blocked", "http_rejected;" + context)
+    if re.search(r"whaleguard", body + " " + str(url), re.I):
+        raise FetchFailure("blocked", "verification_page;marker=whaleguard;" + context)
+    # A normal SMS-code login form is not evidence of WAF rejection.
+    if (host == "passport.ctrip.com" or host.endswith(".passport.ctrip.com")
+            or re.search(r"请先登录|请登录后(?:查看|查询)|登录后.{0,6}(?:才|方可).{0,6}(?:查看|查询)", body)):
+        raise FetchFailure("login_required", "login_page;" + context)
+    for marker, pattern in (("security_verification", r"(?:请|需要|须|进行|完成).{0,12}(?:安全验证|访问验证)|^\s*(?:安全验证|访问验证)\s*$"),
+                            ("slider", r"滑动验证|拖动.{0,8}滑块|滑块验证"),
+                            ("captcha_prompt", r"请.{0,12}(完成|输入).{0,6}验证码")):
+        if re.search(pattern, body, re.I | re.M):
+            raise FetchFailure("blocked", "verification_marker;marker=" + marker + ";" + context)
 
 
 def build_url(fc, tc, date, ret):
@@ -28,17 +48,24 @@ def fetch_round_trip(crawler, fc, tc, date, ret):
     try:
         with crawler.browser() as ctx:
             page = crawler.new_page(ctx)
+            # Same browsing sequence as upstream; stop before search if home is gated.
+            warm = page.goto("https://flights.ctrip.com/", wait_until="domcontentloaded",
+                             timeout=crawler.timeout_ms)
+            # An HTTP rejection should stop immediately, even if its body never loads.
+            check_access("", page.url, warm.status if warm else None, "homepage")
+            check_access(page.inner_text("body", timeout=crawler.timeout_ms), page.url,
+                         warm.status if warm else None, "homepage")
+            page.wait_for_timeout(2500)
+            check_access(page.inner_text("body", timeout=crawler.timeout_ms), page.url,
+                         warm.status if warm else None, "homepage_ready")
+            crawler.logger.info("[ctrip] 首页预热完成；http=%s", warm.status if warm else None)
             response = page.goto(url, wait_until="domcontentloaded", timeout=crawler.timeout_ms)
-            if response and response.status in (403, 429):
-                raise FetchFailure("blocked", "http_rejected")
+            http_status = response.status if response else None
+            check_access("", page.url, http_status, "roundtrip")
             deadline = time.monotonic() + crawler.timeout_ms / 1000
             while True:
                 body = page.inner_text("body", timeout=crawler.timeout_ms)
-                if re.search(r"验证码|安全验证|访问验证|滑块|whaleguard",
-                             body + " " + str(page.url), re.I):
-                    raise FetchFailure("blocked", "verification_page")
-                if "passport" in page.url or re.search(r"请先登录|登录后.{0,8}(查看|查询)", body):
-                    raise FetchFailure("login_required", "login_page")
+                check_access(body, page.url, http_status, "roundtrip")
                 if f"round-{fc.lower()}-{tc.lower()}" not in page.url or f"{date}_{ret}" not in page.url:
                     raise FetchFailure("error", "redirected_or_wrong_search_context")
                 rows = ProductParser._parse_rt_body(body, date, ret)
