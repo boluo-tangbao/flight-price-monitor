@@ -19,7 +19,7 @@ from core.alerter import Alerter
 from core.scheduler import run_scheduler
 from core.notifier import build_notifier
 from crawlers import REGISTRY
-from core.collection import collect
+from core.collection import collect, FetchFailure
 from core.health import HealthMonitor
 from datetime import date as Date
 
@@ -100,8 +100,10 @@ def main():
     ap = argparse.ArgumentParser(description="机票价格监控工具")
     ap.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
     ap.add_argument("--once", action="store_true", help="只运行一次后退出")
+    ap.add_argument("--browser-channel", choices=["chromium", "chrome", "msedge"],
+                    help="携程电脑版使用的浏览器；登录和采集使用相同选项")
     ap.add_argument("--login", metavar="PLATFORM",
-                    help="登录指定平台(ctrip/fliggy/tongcheng)，弹出可见浏览器，登录完成后回车保存会话")
+                    help="登录指定平台(ctrip-pc=携程电脑版；ctrip=手机版)，完成后回车保存会话")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -109,12 +111,34 @@ def main():
         print(f"配置文件不存在: {cfg_path}", file=sys.stderr)
         sys.exit(1)
     cfg = load_config(str(cfg_path))
+    if args.browser_channel:
+        cfg.setdefault("crawler", {})["pc_browser_channel"] = args.browser_channel
     if os.environ.get("SERVERCHAN_SEND_KEY"):
         sc = cfg.setdefault("notifier", {}).setdefault("serverchan", {})
         sc.update(enabled=True, send_key=os.environ["SERVERCHAN_SEND_KEY"])
 
     out = cfg.get("output", {})
     logger = setup_logger(out.get("log_path", "logs/monitor.log"))
+
+    # Login is independent of database creation, notification and monitoring.
+    if args.login:
+        name = args.login.strip().lower()
+        platform = "ctrip" if name == "ctrip-pc" else name
+        cls = REGISTRY.get(platform)
+        if cls is None:
+            print(f"未知平台: {name}，可选: {list(REGISTRY) + ['ctrip-pc']}", file=sys.stderr)
+            sys.exit(2)
+        crawler = cls(cfg.get("crawler", {}), logger)
+        if name == "ctrip-pc":
+            try:
+                crawler.interactive_login_pc()
+            except FetchFailure as e:
+                print(f"[{e.status}] {e}", file=sys.stderr)
+                sys.exit(3)
+        else:
+            crawler.interactive_login()
+        return
+
     storage = PriceStorage(out.get("db_path", "data/prices.db"))
     notifier = build_notifier(cfg.get("notifier"), logger)
     if notifier:
@@ -127,17 +151,6 @@ def main():
         push_drop_min=float(notify_cfg.get("push_drop_min", 30)),
         push_rise_min=float(notify_cfg.get("push_rise_min", 50)),
     )
-
-    # ---- 登录模式 ----
-    if args.login:
-        name = args.login.strip().lower()
-        cls = REGISTRY.get(name)
-        if cls is None:
-            print(f"未知平台: {name}，可选: {list(REGISTRY)}", file=sys.stderr)
-            sys.exit(2)
-        crawler = cls(cfg.get("crawler", {}), logger)
-        crawler.interactive_login()
-        return
 
     job = make_job(cfg, logger, storage, alerter)
 

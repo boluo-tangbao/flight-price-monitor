@@ -40,7 +40,6 @@ def run_scheduler(job, interval_minutes: int, run_on_start: bool = True,
         id="price_monitor",
         max_instances=1,
         coalesce=True,
-        next_run_time=None,
     )
     if run_on_start:
         wrapped()

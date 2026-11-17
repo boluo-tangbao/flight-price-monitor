@@ -34,7 +34,8 @@ def fetch_round_trip(crawler, fc, tc, date, ret):
             deadline = time.monotonic() + crawler.timeout_ms / 1000
             while True:
                 body = page.inner_text("body", timeout=crawler.timeout_ms)
-                if re.search(r"验证码|安全验证|访问验证|滑块|whaleguard", body):
+                if re.search(r"验证码|安全验证|访问验证|滑块|whaleguard",
+                             body + " " + str(page.url), re.I):
                     raise FetchFailure("blocked", "verification_page")
                 if "passport" in page.url or re.search(r"请先登录|登录后.{0,8}(查看|查询)", body):
                     raise FetchFailure("login_required", "login_page")

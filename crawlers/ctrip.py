@@ -10,6 +10,7 @@ import re
 import json
 import urllib.parse
 from typing import List
+from playwright.sync_api import Error as PlaywrightError
 
 from core.models import FlightPrice
 from .base import BaseCrawler
@@ -18,6 +19,22 @@ from .base import BaseCrawler
 class CtripCrawler(BaseCrawler):
     name = "ctrip"
     use_mobile = True  # 移动端 H5
+
+    @property
+    def user_data_dir(self):
+        channel = self.config.get("pc_browser_channel", "chromium")
+        if not self.use_mobile and channel in ("chrome", "msedge"):
+            # Do not open a newer bundled Chromium profile in an older branded browser.
+            path = os.path.join(self.user_data_root, f"ctrip-{channel}")
+            os.makedirs(path, exist_ok=True)
+            return path
+        return super().user_data_dir
+
+    def _check_pc_block(self, page):
+        from core.collection import FetchFailure
+        body = page.inner_text("body", timeout=self.timeout_ms)
+        if re.search(r"whaleguard|访问被拒绝|access denied", str(body) + " " + str(page.url), re.I):
+            raise FetchFailure("blocked", "携程风控拦截，登录未完成；停止重试，需人工确认")
 
     def fetch_round_trip(self, from_city, to_city, date, return_date):
         from .ctrip_roundtrip import fetch_round_trip
@@ -46,6 +63,45 @@ class CtripCrawler(BaseCrawler):
 
     def login_url(self) -> str:
         return "https://m.ctrip.com/webapp/passenger/login"
+
+    def interactive_login_pc(self):
+        """Manual PC login, using the same persistent profile as round-trip fetch."""
+        mobile = self.use_mobile
+        self.use_mobile = False
+        try:
+            with self.browser(headless=False) as ctx:
+                page = self.new_page(ctx)
+                # Leave the new page blank: the user reported that address-bar
+                # navigation works in this browser while automatic goto is blocked.
+                print("请在弹出的空白页地址栏中手动粘贴并打开：https://flights.ctrip.com/")
+                print("随后点击登录，自行完成扫码或验证码。")
+                print("确认页面显示已登录后，回到此终端按 Enter 关闭窗口并保留会话。")
+                print(f"会话目录：{os.path.abspath(self.user_data_dir)}")
+                try:
+                    input(">>> 完成登录后按 Enter：")
+                except EOFError as e:
+                    raise RuntimeError("PC 登录需要交互终端，请在 PowerShell 中运行该命令") from e
+                from core.collection import FetchFailure
+                # input() blocks the synchronous Playwright event dispatcher.
+                # Re-enter the API before inspecting cached page URLs/new tabs.
+                try:
+                    page.wait_for_timeout(100)
+                except PlaywrightError:
+                    # Closing the original tab may be intentional; inspect remaining tabs.
+                    pass
+                open_pages = [p for p in ctx.pages if not p.is_closed()]
+                hosts = [(urllib.parse.urlparse(str(p.url)).hostname or "").lower().rstrip(".")
+                         for p in open_pages]
+                pages = [p for p, host in zip(open_pages, hosts)
+                         if host == "ctrip.com" or host.endswith(".ctrip.com")]
+                if not pages:
+                    domains = ", ".join(sorted(set(hosts))) or "空白页或窗口已关闭"
+                    raise FetchFailure("login_incomplete", f"页面检查未通过（当前域名：{domains}）；"
+                                       "已有会话目录已保留，不能据此判断登录失败。请重开同一浏览器会话确认")
+                self._check_pc_block(pages[-1])
+            self.logger.info("携程 PC 浏览器已关闭，会话已保留；登录是否可用于报价仍需实机验收")
+        finally:
+            self.use_mobile = mobile
 
     def fetch(self, from_city: str, to_city: str, dates: List[str]) -> List[FlightPrice]:
         results: List[FlightPrice] = []

@@ -60,8 +60,12 @@ class BaseCrawler:
     def browser(self, headless: Optional[bool] = None):
         """启动持久化浏览器上下文。headless=None 时使用配置。"""
         hl = self.headless if headless is None else headless
+        native_pc = self.name == "ctrip" and not self.use_mobile
+        channel = self.config.get("pc_browser_channel", "chromium")
+        if native_pc and channel not in ("chromium", "chrome", "msedge"):
+            raise ValueError("pc_browser_channel must be chromium, chrome or msedge")
         with sync_playwright() as p:
-            ctx = p.chromium.launch_persistent_context(
+            options = dict(
                 user_data_dir=self.user_data_dir,
                 headless=hl,
                 user_agent=self._ua(),
@@ -76,9 +80,17 @@ class BaseCrawler:
                     "--disable-dev-shm-usage",
                 ],
             )
-            ctx.add_init_script(
-                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-            )
+            if native_pc:
+                # Let the desktop browser supply its own UA and automation defaults.
+                for key in ("user_agent", "args", "is_mobile", "has_touch"):
+                    options.pop(key)
+                if channel != "chromium":
+                    options["channel"] = channel
+            ctx = p.chromium.launch_persistent_context(**options)
+            if not native_pc:
+                ctx.add_init_script(
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                )
             try:
                 yield ctx
             finally:

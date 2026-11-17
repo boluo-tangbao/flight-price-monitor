@@ -99,9 +99,57 @@ health:
   quiet_end: "07:00"
 ```
 
-当你决定启动实际监控时，先在自己的正常环境完成携程登录；PC 与 H5 的会话可用性需要现场验证，
-现有 `--login ctrip` 仍是原有 H5 登录入口，登录后也可能被 PC 页面判为需要登录，届时以健康记录为准。
-本次没有索取或读取凭据，也没有执行这个联网验证。
+完成携程 PC 登录：在项目目录中使用已安装依赖和 Chromium 的 Python 环境运行：
+
+```powershell
+python main.py -c config.roundtrip.example.yaml --login ctrip-pc
+```
+
+当前项目未发现 config.yaml，因此上面指定已有示例作为登录配置；它默认使用 user_data/ctrip，
+与默认往返采集共用会话目录。将来使用自定义配置时，登录与采集都指定同一份配置、从同一项目目录启动，
+确保 crawler.user_data_dir 一致。PC 登录命令使用桌面 UA 和可见浏览器，
+不创建价格数据库、不执行采集、不发送通知。不要与另一个正在使用同一会话目录的采集进程同时启动。
+
+PC 登录现在先打开空白页，由用户在地址栏手动粘贴 `https://flights.ctrip.com/` 进入；
+程序不自动导航到携程。在页面点击登录，自行扫码或完成验证码；看到已登录后回到终端按 Enter 关闭窗口。
+支持在同一窗口新建标签页登录；若仍停留在空白页或已关闭携程标签页，则报告 login_incomplete，不报告完成。
+原有 `--login ctrip` 保留手机网页入口。保存了会话不代表平台必然允许报价，需要后续实际往返页面验收。
+本轮没有索取或读取凭据，也没有执行联网登录验证。
+
+### whaleguard block 的诊断
+
+先用日常 Chrome/Edge 在同机同网手动访问携程；普通浏览器也被拦截时，应暂停采集，按网站提示处理或联系携程，
+不能仅凭提示认定是账户、IP 或浏览器原因。不要循环刷新登录页。
+
+携程 PC 登录和往返查询现使用浏览器自身的 UA 与默认自动化标识，不沿用旧 Chrome 126 UA 或隐藏 webdriver 的脚本。
+支持已安装 Edge（`--browser-channel msedge`）或 Chrome（`--browser-channel chrome`），不自动安装或替换日常浏览器。
+
+```powershell
+python main.py -c config.roundtrip.example.yaml --login ctrip-pc --browser-channel msedge
+```
+
+Edge 使用项目独立目录 `user_data/ctrip-msedge`，Chrome 使用 `user_data/ctrip-chrome`；
+原 Chromium 会话 `user_data/ctrip` 保留。新浏览器首次需要登录，不读取你日常浏览器的配置或登录记录。
+之后查询时也要带相同的 `--browser-channel msedge`，或在自己的配置里设置：
+
+```yaml
+crawler:
+  pc_browser_channel: msedge
+```
+
+PC 登录遇到 whaleguard/访问被拒绝将报告 blocked 并以退出码 3 结束，不报告登录完成、不自动重试。
+浏览器兼容配置的调整不保证风控解除；实际原因与会话有效性仍需现场验证。
+
+后续用户确认：同一个程序启动的浏览器，手动在地址栏进入携程可以正常访问，自动导航则被拦。
+因此不能将本次问题直接归因于 Chromium、浏览器版本或网络；PC 登录采用手动导航。
+目前只改变登录阶段，自动往返查询仍使用程序导航，保存会话后是否能正常查询需单独验收。
+
+### 登录后误报 login_incomplete
+
+同步 Playwright 在终端 input() 阻塞期间可能尚未分发手动导航与新标签事件；直接读取 page.url/ctx.pages
+会读到旧空白页状态。回车后现先通过一次短暂的 Playwright 等待处理事件，再检查当前页面，并接受根域 ctrip.com。
+失败诊断只显示域名、不显示路径或查询参数；会话目录不删除。窗口在回车后关闭是程序退出时清理浏览器的行为，
+本身不证明登录失效。重开同一浏览器选项后手动进入携程，若仍显示已登录，直接回终端确认即可，无需再次扫码。
 
 ```powershell
 python -m unittest discover -s tests -v
