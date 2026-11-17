@@ -22,10 +22,30 @@ class CloudSessionTests(unittest.TestCase):
         self.assertEqual(len(filtered["cookies"]), 1)
         self.assertEqual(len(filtered["origins"]), 1)
 
-    def test_package_roundtrip_and_expiry(self):
-        value = encode_state(sample(), now=1000)
+    def test_explicit_package_expiry_is_enforced(self):
+        value = encode_state(sample(), now=1000, ttl_days=7)
         self.assertEqual(decode_state(value, now=1001), minimal_state(sample()))
         with self.assertRaises(FetchFailure): decode_state(value, now=1000 + 7 * 86400)
+
+    def test_default_package_is_not_rejected_after_seven_days(self):
+        value = encode_state(sample(), now=1000)
+        self.assertEqual(decode_state(value, now=1000 + 90 * 86400), minimal_state(sample()))
+
+    def test_previously_uploaded_v1_package_ignores_old_seven_day_cap(self):
+        package = {"version": 1, "issued_at": 1000, "expires_at": 1000 + 7 * 86400,
+                   "state": minimal_state(sample())}
+        value = base64.b64encode(json.dumps(package).encode()).decode()
+        self.assertEqual(decode_state(value, now=1000 + 30 * 86400), minimal_state(sample()))
+
+    def test_platform_cookie_expiry_is_never_extended(self):
+        state = sample()
+        state["cookies"][0]["expires"] = 1100
+        restored = decode_state(encode_state(state, now=1000), now=2000)
+        self.assertEqual(restored["cookies"][0]["expires"], 1100)
+
+    def test_invalid_optional_validity_refused(self):
+        for days in (0, -1, True):
+            with self.assertRaises(ValueError): encode_state(sample(), ttl_days=days)
 
     def test_invalid_value_never_echoed_in_error(self):
         with self.assertRaises(FetchFailure) as error: decode_state("sensitive-invalid-value")

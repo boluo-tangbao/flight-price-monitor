@@ -1,4 +1,4 @@
-"""Minimal, time-limited Ctrip state. Never log values or write plaintext state."""
+"""Minimal Ctrip state with optional expiry. Never log or write plaintext state."""
 import base64
 import json
 import os
@@ -25,9 +25,12 @@ def minimal_state(state):
     return {"cookies": cookies, "origins": origins}
 
 
-def encode_state(state, now=None):
+def encode_state(state, now=None, ttl_days=None):
     now = int(time.time() if now is None else now)
-    package = {"version": 1, "issued_at": now, "expires_at": now + 7 * 86400,
+    if ttl_days is not None and (type(ttl_days) is not int or ttl_days <= 0):
+        raise ValueError("Optional validity must be a positive number of days")
+    package = {"version": 2, "issued_at": now,
+               "expires_at": now + ttl_days * 86400 if ttl_days is not None else None,
                "state": minimal_state(state)}
     encoded = base64.b64encode(json.dumps(package, separators=(",", ":")).encode()).decode("ascii")
     if len(encoded) > MAX_BYTES:
@@ -41,8 +44,19 @@ def decode_state(value, now=None):
             raise ValueError()
         package = json.loads(base64.b64decode(value, validate=True))
         now = int(time.time() if now is None else now)
-        if (package["version"] != 1 or not package["issued_at"] <= now < package["expires_at"]
-                or package["expires_at"] - package["issued_at"] > 7 * 86400):
+        if type(package["issued_at"]) is not int or package["issued_at"] > now:
+            raise ValueError()
+        if package["version"] == 1:
+            # v1 only supported a mandatory 7-day cap. The user has revoked that
+            # policy; retain existing uploads without changing real cookie expiry.
+            if package.get("expires_at") != package["issued_at"] + 7 * 86400:
+                raise ValueError()
+        elif package["version"] == 2:
+            expires = package["expires_at"]
+            if expires is not None and (type(expires) is not int or
+                    expires <= package["issued_at"] or now >= expires):
+                raise ValueError()
+        else:
             raise ValueError()
         state = minimal_state(package["state"])
         if state != package["state"]:

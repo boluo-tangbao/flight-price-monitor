@@ -95,7 +95,11 @@ def main():
     parser.add_argument("--repo", default="boluo-tangbao/flight-price-monitor")
     parser.add_argument("--environment", default="ctrip-cloud")
     parser.add_argument("--browser-channel", choices=["msedge", "chrome", "chromium"], default="msedge")
+    parser.add_argument("--ttl-days", type=int, default=None,
+                        help="Optional local expiry in days; default follows platform session validity")
     args = parser.parse_args()
+    if args.ttl_days is not None and args.ttl_days <= 0:
+        parser.error("--ttl-days must be positive")
     if args.repo != "boluo-tangbao/flight-price-monitor" or not re.fullmatch(r"[A-Za-z0-9_-]+", args.environment):
         parser.error("Only the intended repository and a simple environment name are allowed")
     try:
@@ -105,7 +109,7 @@ def main():
         token = github_token(project)
         root, key = prepare_environment(token, args.repo, args.environment)
         state = read_local_state(project, args.browser_channel)
-        encoded = encode_state(state)
+        encoded = encode_state(state, ttl_days=args.ttl_days)
         encrypted = SealedBox(PublicKey(key["key"], Base64Encoder)).encrypt(encoded.encode("ascii"))
         api(token, "PUT", root + "/secrets/" + SECRET_NAME,
             {"encrypted_value": base64.b64encode(encrypted).decode("ascii"), "key_id": key["key_id"]})
@@ -113,7 +117,9 @@ def main():
         if not info or info.get("name") != SECRET_NAME:
             raise UploadError("Upload response could not be confirmed")
         print(f"Uploaded {SECRET_NAME} to {args.repo} / {args.environment}; main branch only.")
-        print("Only Ctrip state was included; no plaintext state file was written. Renew within 7 days.")
+        print("Only Ctrip state was included; no plaintext state file was written.")
+        print(f"Optional package expiry: {args.ttl_days} days." if args.ttl_days is not None else
+              "No fixed package expiry. Update when Ctrip requires login again.")
         return 0
     except ImportError:
         print("Install local helper dependency: python -m pip install -r requirements-session.txt", file=sys.stderr)
