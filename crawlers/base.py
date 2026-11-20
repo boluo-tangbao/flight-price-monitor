@@ -90,14 +90,42 @@ class BaseCrawler:
             state = consume_cloud_state() if native_pc else None
             cloud_browser = None
             if state is not None:
+                mode = self.config.get("cloud_pc_browser_mode", "upstream")
+                if mode not in ("upstream", "native"):
+                    raise ValueError("cloud_pc_browser_mode must be upstream or native")
+                if mode == "upstream" and channel == "msedge":
+                    raise ValueError("Upstream cloud identity requires chromium or chrome; "
+                                     "use cloud_pc_browser_mode=native for msedge")
                 launch = {"headless": hl}
                 if "channel" in options:
                     launch["channel"] = options["channel"]
+                if mode == "upstream":
+                    from .ctrip_stealth_ext import launch_args
+                    launch["args"] = launch_args({"stealth": True}) + [
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox", "--disable-dev-shm-usage",
+                    ]
                 cloud_browser = p.chromium.launch(**launch)
                 try:
-                    ctx = cloud_browser.new_context(storage_state=state,
+                    context_options = dict(storage_state=state,
                         viewport=options["viewport"], locale=options["locale"],
                         timezone_id=options["timezone_id"])
+                    self.cloud_browser_diagnostics = {"mode": mode,
+                                                       "initialization_installed": False}
+                    if mode == "upstream":
+                        from .ctrip_browser_identity import desktop_profile, initialization_script
+                        profile = desktop_profile(cloud_browser.version, options["viewport"])
+                        context_options.update(user_agent=profile["ua"],
+                                               is_mobile=False, has_touch=False)
+                    ctx = cloud_browser.new_context(**context_options)
+                    if mode == "upstream":
+                        # Exactly one init script, installed before the first page exists.
+                        ctx.add_init_script(initialization_script(profile))
+                        self.cloud_browser_diagnostics.update(
+                            initialization_installed=True,
+                            kernel_major=int(cloud_browser.version.split(".")[0]))
+                    self.logger.info("[ctrip] 云端浏览器 mode=%s; initialization_installed=%s",
+                                     mode, self.cloud_browser_diagnostics["initialization_installed"])
                 except Exception:
                     cloud_browser.close()
                     raise

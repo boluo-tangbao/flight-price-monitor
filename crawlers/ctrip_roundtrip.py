@@ -41,24 +41,61 @@ def build_url(fc, tc, date, ret):
             f"?depdate={date}_{ret}&cabin=y_s&adult=1&child=0&infant=0&containstax=1")
 
 
+RISK_COOKIES = ("cticket", "_bfa", "MKT_CKID")
+
+
+def prepare_homepage(crawler, ctx):
+    """One homepage visit; wait for cookie readiness without refreshing or solving.
+
+    Cookie presence follows upstream's readiness signal, not proof of login or
+    server acceptance. Stop on a challenge, including while waiting for cookies.
+    """
+    page = crawler.new_page(ctx)
+    try:
+        crawler.round_trip_diagnostics["homepage_visits"] += 1
+        response = page.goto("https://flights.ctrip.com/", wait_until="domcontentloaded",
+                             timeout=crawler.timeout_ms)
+        status = response.status if response else None
+        check_access("", page.url, status, "homepage")
+        check_access(page.inner_text("body", timeout=crawler.timeout_ms), page.url,
+                     status, "homepage")
+        page.wait_for_timeout(2500)
+        deadline = time.monotonic() + min(12, crawler.timeout_ms / 1000)
+        while True:
+            check_access(page.inner_text("body", timeout=crawler.timeout_ms), page.url,
+                         status, "homepage_ready")
+            # Scope the check to cookies the browser can send to this entry.
+            names = {c.get("name") for c in ctx.cookies(["https://flights.ctrip.com/"])}
+            ready = bool(names.intersection(RISK_COOKIES))
+            crawler.round_trip_diagnostics["warmup_cookie_present"] = ready
+            if ready:
+                crawler.logger.info("[ctrip] 首页预热完成；http=%s; risk_cookie_present=true", status)
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FetchFailure("error", "warmup_missing_risk_cookie;stage=homepage_ready;"
+                                   f"http={status};host=flights.ctrip.com")
+            # Pump browser events so delayed homepage scripts can finish writing.
+            page.wait_for_timeout(min(800, max(1, int(remaining * 1000))))
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
 def fetch_round_trip(crawler, fc, tc, date, ret):
     url = build_url(fc, tc, date, ret)
+    crawler.round_trip_diagnostics = {"homepage_visits": 0, "search_visits": 0,
+                                      "warmup_cookie_present": None}
     mobile = crawler.use_mobile
     crawler.use_mobile = False
     try:
         with crawler.browser() as ctx:
+            # Upstream uses separate warmup/result tabs in the same context.
+            prepare_homepage(crawler, ctx)
             page = crawler.new_page(ctx)
-            # Same browsing sequence as upstream; stop before search if home is gated.
-            warm = page.goto("https://flights.ctrip.com/", wait_until="domcontentloaded",
-                             timeout=crawler.timeout_ms)
-            # An HTTP rejection should stop immediately, even if its body never loads.
-            check_access("", page.url, warm.status if warm else None, "homepage")
-            check_access(page.inner_text("body", timeout=crawler.timeout_ms), page.url,
-                         warm.status if warm else None, "homepage")
-            page.wait_for_timeout(2500)
-            check_access(page.inner_text("body", timeout=crawler.timeout_ms), page.url,
-                         warm.status if warm else None, "homepage_ready")
-            crawler.logger.info("[ctrip] 首页预热完成；http=%s", warm.status if warm else None)
+            crawler.round_trip_diagnostics["search_visits"] += 1
             response = page.goto(url, wait_until="domcontentloaded", timeout=crawler.timeout_ms)
             http_status = response.status if response else None
             check_access("", page.url, http_status, "roundtrip")

@@ -55,6 +55,8 @@ class ParserTests(unittest.TestCase):
         page.url = build_url("SHA", "TYO", DEP, RET)
         page.inner_text.return_value = body
         page.goto.return_value.status = 200
+        c.browser.return_value.__enter__.return_value.cookies.return_value = [
+            {"name": "cticket", "value": "synthetic"}]
         return c
 
     def test_adapter_uses_total_and_restores_browser_mode(self):

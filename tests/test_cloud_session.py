@@ -74,6 +74,7 @@ class CloudSessionTests(unittest.TestCase):
         crawler.use_mobile = False
         with patch.dict(os.environ, {SECRET_NAME: encode_state(sample())}), patch("crawlers.base.sync_playwright") as pw:
             browser_type = pw.return_value.__enter__.return_value.chromium
+            browser_type.launch.return_value.version = "159.0.8422.0"
             with crawler.browser():
                 browser_type.launch_persistent_context.assert_not_called()
                 self.assertNotIn(SECRET_NAME, os.environ)

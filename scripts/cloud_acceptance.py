@@ -1,4 +1,4 @@
-"""One anonymous cloud query, without retries, login state or notifications."""
+"""One cloud acceptance attempt; optional login state, no retries or notifications."""
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -25,13 +25,18 @@ def main():
     route = build_routes(cfg)[0]
     logger = logging.getLogger("cloud_acceptance")
     logging.basicConfig(level=logging.INFO)
-    result = collect(CtripCrawler(cfg["crawler"], logger), route.from_code, route.to_code,
+    crawler = CtripCrawler(cfg["crawler"], logger)
+    result = collect(crawler, route.from_code, route.to_code,
                      route.dates[0], route.return_dates[0])
     rows = [{"ticket_from_price": q.price, "baggage_inclusive_total": baggage_total(q),
              "depart_date": q.depart_date, "return_date": q.return_date,
              "flight_no": q.flight_no, "source_url": q.source_url} for q in result.prices]
     ready = any(r["baggage_inclusive_total"] is not None for r in rows)
-    report = {"status": result.status, "evidence": result.evidence, "queries": 1,
+    navigation = getattr(crawler, "round_trip_diagnostics", {})
+    report = {"status": result.status, "evidence": result.evidence, "attempts": 1,
+              "queries": navigation.get("search_visits", 0),
+              "navigation": navigation,
+              "browser": getattr(crawler, "cloud_browser_diagnostics", {}),
               "account_used": has_state, "notifications_sent": False,
               "baggage_verified": ready, "quotes": rows}
     out = Path("data/cloud-acceptance.json")

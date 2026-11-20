@@ -65,6 +65,7 @@ class LocalPage:
         self.home_status, self.search_status = home_status, search_status
         self.late_home_body = late_home_body
         self.requests, self.waits, self.body_reads = [], [], 0
+        self.closed = False
 
     def goto(self, url, **kwargs):
         self.requests.append(url)
@@ -82,13 +83,25 @@ class LocalPage:
     def wait_for_timeout(self, ms):
         self.waits.append(ms)
 
+    def close(self):
+        self.closed = True
+
 
 class WarmupTests(unittest.TestCase):
-    def run_query(self, page):
-        crawler = CtripCrawler({"timeout_seconds": 35}, logging.getLogger("warmup-test"))
+    def run_query(self, page, cookie_batches=None, timeout=35):
+        crawler = CtripCrawler({"timeout_seconds": timeout}, logging.getLogger("warmup-test"))
+        self.crawler = crawler
+        batches = iter(cookie_batches or [[{"name": "cticket", "value": "synthetic"}]])
+        last = []
+        def cookies(urls):
+            nonlocal last
+            self.assertEqual(urls, [HOME])
+            last = next(batches, last)
+            return last
+        context = SimpleNamespace(cookies=cookies)
         @contextmanager
         def browser(**kwargs):
-            yield object()
+            yield context
         with patch.object(crawler, "browser", browser), patch.object(crawler, "new_page", return_value=page):
             try:
                 return fetch_round_trip(crawler, "SHA", "OSA", "2027-02-15", "2027-02-22")
@@ -101,6 +114,62 @@ class WarmupTests(unittest.TestCase):
         self.assertEqual(page.requests, [HOME, SEARCH])
         self.assertEqual(page.waits, [2500])
         self.assertEqual(quotes[0].price, 2799)
+        self.assertEqual(self.crawler.round_trip_diagnostics,
+                         {"homepage_visits": 1, "search_visits": 1,
+                          "warmup_cookie_present": True})
+
+    def test_delayed_cookie_is_waited_for_without_reloading_home(self):
+        page = LocalPage()
+        self.assertEqual(self.run_query(page, cookie_batches=[[], [{"name": "_bfa"}]])[0].price, 2799)
+        self.assertEqual(page.requests, [HOME, SEARCH])
+        self.assertEqual(page.waits, [2500, 800])
+
+    def test_cookie_never_arrives_stops_without_search(self):
+        page = LocalPage()
+        with self.assertRaises(FetchFailure) as caught:
+            self.run_query(page, cookie_batches=[[]], timeout=0)
+        self.assertEqual(page.requests, [HOME])
+        self.assertEqual(caught.exception.status, "error")
+        self.assertIn("warmup_missing_risk_cookie", str(caught.exception))
+        self.assertEqual(self.crawler.round_trip_diagnostics["search_visits"], 0)
+        self.assertTrue(page.closed)
+
+    def test_unrelated_cookie_is_not_warmup_readiness(self):
+        page = LocalPage()
+        with self.assertRaises(FetchFailure):
+            self.run_query(page, cookie_batches=[[{"name": "unrelated"}]], timeout=0)
+        self.assertEqual(page.requests, [HOME])
+
+    def test_challenge_while_waiting_for_cookie_stops_without_search(self):
+        page = LocalPage()
+        original_wait = page.wait_for_timeout
+        def wait(ms):
+            original_wait(ms)
+            if len(page.waits) > 1:
+                page.late_home_body = "WhaleGuard Block"
+        page.wait_for_timeout = wait
+        with self.assertRaises(FetchFailure) as caught:
+            self.run_query(page, cookie_batches=[[]])
+        self.assertIn("marker=whaleguard", str(caught.exception))
+        self.assertEqual(page.requests, [HOME])
+
+    def test_result_uses_new_tab_in_same_context_after_warmup_closes(self):
+        crawler = CtripCrawler({}, logging.getLogger("tabs-test"))
+        home, result = LocalPage(), LocalPage()
+        context = SimpleNamespace(cookies=lambda urls: [{"name": "cticket"}])
+        @contextmanager
+        def browser(**kwargs):
+            yield context
+        def new_page(ctx):
+            self.assertIs(ctx, context)
+            if home.requests:
+                self.assertTrue(home.closed)
+                return result
+            return home
+        with patch.object(crawler, "browser", browser), patch.object(crawler, "new_page", new_page):
+            self.assertEqual(fetch_round_trip(crawler, "SHA", "OSA", "2027-02-15", "2027-02-22")[0].price, 2799)
+        self.assertEqual(home.requests, [HOME])
+        self.assertEqual(result.requests, [SEARCH])
 
     def test_homepage_rejection_never_reaches_search_or_body_read(self):
         page = LocalPage(home_status=403)
