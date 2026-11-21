@@ -9,7 +9,7 @@ import os
 from main import load_config, build_routes
 from crawlers.ctrip import CtripCrawler
 from core.collection import collect
-from core.baggage import baggage_total
+from core.baggage import lowest_round_trip_options
 
 
 def main():
@@ -28,9 +28,11 @@ def main():
     crawler = CtripCrawler(cfg["crawler"], logger)
     result = collect(crawler, route.from_code, route.to_code,
                      route.dates[0], route.return_dates[0])
-    rows = [{"ticket_from_price": q.price, "baggage_inclusive_total": baggage_total(q),
+    rows = [{"ticket_from_price": q.price, "baggage_inclusive_total": total,
              "depart_date": q.depart_date, "return_date": q.return_date,
-             "flight_no": q.flight_no, "source_url": q.source_url} for q in result.prices]
+             "flight_no": q.flight_no, "return_flight_no": q.return_flight_no,
+             "price_basis": q.price_basis, "baggage_offer": q.baggage_offer,
+             "source_url": q.source_url} for q, total in lowest_round_trip_options(result.prices)]
     ready = any(r["baggage_inclusive_total"] is not None for r in rows)
     navigation = getattr(crawler, "round_trip_diagnostics", {})
     report = {"status": result.status, "evidence": result.evidence, "attempts": 1,
@@ -38,10 +40,16 @@ def main():
               "navigation": navigation,
               "browser": getattr(crawler, "cloud_browser_diagnostics", {}),
               "account_used": has_state, "notifications_sent": False,
-              "baggage_verified": ready, "quotes": rows}
+              "baggage_verified": ready,
+              "budget_cny": route.alert_threshold,
+              "within_budget": any(r["baggage_inclusive_total"] is not None
+                                   and r["baggage_inclusive_total"] <= route.alert_threshold for r in rows),
+              "quotes": rows}
     out = Path("data/cloud-acceptance.json")
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if result.status == "ok" and rows and not ready:
+        logger.warning("已取得往返报价，但两程托运及合计费用尚未核实，完整验收未通过。")
     print(json.dumps(report, ensure_ascii=False))
     return 0 if result.status == "ok" and ready else 2
 

@@ -86,7 +86,11 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter):
                         if ret:
                             for quote in result.prices:
                                 health.save_round_trip(quote)
-                                alerter.check_round_trip(route, quote)
+                            if route.checked_baggage_required and crawler_cfg.get("round_trip_fare_details") is True:
+                                alerter.report_round_trip_options(route, str(date), ret, result)
+                            else:
+                                for quote in result.prices:
+                                    alerter.check_round_trip(route, quote)
                         else:
                             storage.save_many(result.prices)
                             all_prices.extend(result.prices)

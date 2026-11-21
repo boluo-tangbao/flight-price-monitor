@@ -110,12 +110,18 @@ def fetch_round_trip(crawler, fc, tc, date, ret):
                 rows = [r for r in rows if r["basis"] == "product_round_trip_tax"
                         and 100 <= r["price"] <= 200000]
                 if rows:
-                    best = min(rows, key=lambda r: r["price"])
-                    return [RoundTripQuote(
+                    ordered = sorted(rows, key=lambda r: r["price"])
+                    quotes = [RoundTripQuote(
                         platform=crawler.name, from_city=fc, to_city=tc, depart_date=date,
-                        return_date=ret, price=best["price"], airline=best["airline"],
-                        flight_no=best["flight"], depart_time=best["dep"], arrive_time=best["arr"],
-                        source_url=url, extra=json.dumps(rows, ensure_ascii=False))]
+                        return_date=ret, price=row["price"], airline=row["airline"],
+                        flight_no=row["flight"], depart_time=row["dep"], arrive_time=row["arr"],
+                        source_url=url, extra=json.dumps(rows, ensure_ascii=False)) for row in ordered]
+                    if crawler.config.get("round_trip_fare_details") is True:
+                        from .ctrip_fare_details import read_details
+                        diagnostics = crawler.round_trip_diagnostics
+                        diagnostics["expanded_return_options"] = 0
+                        return read_details(page, quotes, check_access, diagnostics)
+                    return quotes[:1]
                 if re.search(r"暂无.{0,8}(航班|机票)|没有.{0,8}(航班|机票)|未找到.{0,8}航班", body):
                     raise FetchFailure("empty", "explicit_no_available_round_trip")
                 if time.monotonic() >= deadline:

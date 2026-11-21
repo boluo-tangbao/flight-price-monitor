@@ -17,7 +17,7 @@ from scripts import cloud_acceptance
 class CloudAcceptanceTests(unittest.TestCase):
     def run_acceptance(self, result, search_visits):
         route = SimpleNamespace(from_code="SHA", to_code="OSA", dates=["2027-02-15"],
-                                return_dates=["2027-02-22"])
+                                return_dates=["2027-02-22"], alert_threshold=2800)
         crawler = SimpleNamespace(
             round_trip_diagnostics={"homepage_visits": 1, "search_visits": search_visits,
                                     "warmup_cookie_present": None if not search_visits else True},

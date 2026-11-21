@@ -11,6 +11,7 @@ routes:
     checked_baggage_required: true
 platforms: [ctrip]
 crawler:
+  round_trip_fare_details: true
   headless: true
   timeout_seconds: 35
   pc_browser_channel: chromium

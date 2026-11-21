@@ -23,3 +23,21 @@ def baggage_total(quote):
             return None
         total += fee
     return total
+
+
+def lowest_round_trip_options(quotes, limit=3):
+    """Compare verified totals. Preserve unknown fares as labelled lower bounds."""
+    priced = [(q, baggage_total(q)) for q in quotes]
+    ranked = sorted(priced, key=lambda row: (row[1] is None,
+                                            row[1] if row[1] is not None else row[0].price))
+    seen = set()
+    options = []
+    for quote, total in ranked:
+        key = (quote.flight_no, quote.return_flight_no, quote.price, total, quote.price_basis)
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append((quote, total))
+        if len(options) == limit:
+            break
+    return options

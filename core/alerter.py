@@ -6,6 +6,38 @@ from .models import FlightPrice, Route
 
 
 class Alerter:
+    def report_round_trip_options(self, route, depart, ret, result):
+        from .baggage import lowest_round_trip_options
+
+        ranked = lowest_round_trip_options(result.prices)
+        if not ranked:
+            self.logger.info("[往返报价] %s/%s 本轮无可报告报价（%s）", depart, ret, result.status)
+            return
+        best, total = ranked[0]
+        if total is not None:
+            self.check_round_trip(route, best)
+            if total <= route.alert_threshold:
+                return
+
+        lines = []
+        for index, (quote, total) in enumerate(ranked, 1):
+            flights = quote.flight_no + (f" / {quote.return_flight_no}" if quote.return_flight_no else "")
+            if total is not None:
+                label = f"含两程托运 ¥{total:,.2f}"
+            else:
+                kind = "往返含税票价" if quote.price_basis == "selected_round_trip_tax" else "往返含税起价"
+                label = f"{kind} ¥{quote.price:,.2f}，托运费用待确认"
+            lines.append(f"{index}. {flights} · {label}")
+        title = f"{route.from_name}↔{route.to_name} 本轮未确认预算内方案"
+        description = (f"去程 {depart} / 回程 {ret}，预算 ¥{route.alert_threshold:,.0f}。\n\n"
+                       "本轮已查最低方案，已核实的含托运总价优先。\n\n"
+                       + "\n".join(lines)
+                       + (f"\n\n详情采集状态：{result.status}" if result.status != "ok" else "")
+                       + f"\n\n[查看往返]({best.source_url})")
+        self.logger.info("[往返报价] %s\n%s", title, description)
+        if self.notifier:
+            self.notifier.send(title, description)
+
     def check_round_trip(self, route, quote):
         if not route.alert_threshold or not self.notifier:
             return

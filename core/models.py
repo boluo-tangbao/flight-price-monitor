@@ -42,3 +42,4 @@ class RoundTripQuote(FlightPrice):
     price_basis: str = "product_round_trip_tax"
     source_url: str = ""
     baggage_offer: dict = field(default_factory=dict)
+    return_flight_no: str = ""

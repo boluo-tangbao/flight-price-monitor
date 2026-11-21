@@ -12,9 +12,10 @@ class FetchResult:
 
 
 class FetchFailure(Exception):
-    def __init__(self, status, evidence):
+    def __init__(self, status, evidence, prices=None):
         super().__init__(evidence)
         self.status = status
+        self.prices = prices or []
 
 
 class _Signals(logging.Handler):
@@ -51,7 +52,7 @@ def collect(crawler, fc, tc, date, return_date=""):
         return FetchResult(status, evidence="legacy_log_signal" if signals.statuses
                            else "no_explicit_empty_response")
     except FetchFailure as e:
-        return FetchResult(e.status, evidence=str(e))
+        return FetchResult(e.status, e.prices, evidence=str(e))
     except Exception as e:
         status = "timeout" if "timeout" in type(e).__name__.lower() else "error"
         return FetchResult(status, evidence=type(e).__name__)
