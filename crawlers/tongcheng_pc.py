@@ -1,6 +1,7 @@
 """Isolated adapter for the pinned upstream Tongcheng desktop workflow."""
 from pathlib import Path
 from urllib.parse import urlsplit
+from contextlib import contextmanager
 
 from .tongcheng_upstream.browser import BaseCrawler
 from .tongcheng_upstream.roundtrip import InternationalRoundTrip
@@ -47,6 +48,14 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
                 self.diagnostics["search_document_requests"] = self.diagnostics.get("search_document_requests", 0) + 1
         page.on("request", count_search)
         return page
+
+    @contextmanager
+    def browser(self, *args, **kwargs):
+        with super().browser(*args, **kwargs) as ctx:
+            yield ctx
+            reader = getattr(self, 'detail_reader', None)
+            if reader is not None and self.last_outcome == 'ok':
+                self.detail_quotes = reader(self._last_page)
 
     def _watch_retry_after(self, page):
         # The pilot records only safe response counts/statuses via capture.

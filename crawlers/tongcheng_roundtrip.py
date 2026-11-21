@@ -145,6 +145,22 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
                 quotes[key] = quote
 
     worker = TongchengDesktop(crawler, diagnostics, capture)
+    if crawler.config.get('tongcheng_round_trip_fare_details') is True:
+        from .tongcheng_fare_details import read_details
+        def detail_reader(page):
+            fallback = list(quotes.values())
+            try:
+                return read_details(page, fallback, check_access, diagnostics,
+                                    preferred_pair=crawler.config.get('tongcheng_detail_pair'))
+            except FetchFailure as error:
+                error.prices = sorted(error.prices, key=lambda q: q.price)[:3]
+                raise
+            except BrowserError as error:
+                status = 'timeout' if 'timeout' in type(error).__name__.lower() else 'error'
+                diagnostics['detail_status'] = status
+                raise FetchFailure(status, 'tongcheng_detail_' + diagnostics.get('detail_stage', 'unknown'),
+                                   prices=sorted(fallback, key=lambda q: q.price)[:3])
+        worker.detail_reader = detail_reader
     try:
         # Execute the upstream international RT branch, including its desktop
         # browser, navigation challenge handler and response completion loop.
@@ -162,6 +178,8 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
         raise FetchFailure("blocked", "tongcheng_verification_page")
     if worker.last_outcome == "timeout":
         raise FetchFailure("timeout", "tongcheng_navigation_timeout")
+    if hasattr(worker, 'detail_quotes'):
+        return worker.detail_quotes
     if quotes:
         return sorted(quotes.values(), key=lambda quote: quote.price)[:3]
     if worker.last_outcome == "empty":
