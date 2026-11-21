@@ -131,15 +131,19 @@ def read_details(page, fallback, check_access, diagnostics):
                 body()
                 link = fare.get_by_text("行李规定", exact=True)
                 legs = {}
-                if link.count() == 1:
-                    card.hover(timeout=2500)
-                    # Never reuse a prior fare's still-open floating panel.
-                    if wait_for(lambda text: not _baggage_popup(text), 1.5):
-                        link.hover(timeout=2500)
-                        def both_rules(text):
-                            rules = included_baggage(_baggage_popup(text))
-                            return rules if len(rules) == 2 else None
-                        legs = wait_for(both_rules, 3) or {}
+                try:
+                    if link.count() == 1:
+                        card.hover(timeout=2500)
+                        # Never reuse a prior fare's still-open floating panel.
+                        if wait_for(lambda text: not _baggage_popup(text), 1.5):
+                            link.hover(timeout=2500)
+                            def both_rules(text):
+                                rules = included_baggage(_baggage_popup(text))
+                                return rules if len(rules) == 2 else None
+                            legs = wait_for(both_rules, 3) or {}
+                except BrowserTimeout:
+                    # The fare has a price even when the rules UI is unavailable.
+                    pass
                 offer = {"itinerary_confirmed": True, "tax_inclusive_ticket_confirmed": True, **legs}
                 quote = replace(original, price=price, return_flight_no=inbound,
                                 price_basis="selected_round_trip_tax", baggage_offer=offer)
@@ -155,6 +159,8 @@ def read_details(page, fallback, check_access, diagnostics):
         status = "error"
     diagnostics["detail_status"] = status
     diagnostics["fare_options"] = len(confirmed)
+    diagnostics["fare_options_missing_baggage_rules"] = sum(
+        not {"outbound", "inbound"} <= q.baggage_offer.keys() for q in confirmed)
     detailed_returns = {q.return_flight_no for q in confirmed}
     quotes = confirmed + [q for q in return_estimates if q.return_flight_no not in detailed_returns]
     if len(quotes) < 3:

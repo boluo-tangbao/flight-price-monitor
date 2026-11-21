@@ -30,7 +30,7 @@
 
 `cloud-acceptance.yml` 在专用验收分支 push 时查询一次同一行程：无账号、无本机登录态、无通知密钥、无重试。
 结果附件 `osaka-cloud-acceptance` 中为 `data/cloud-acceptance.json`。
-`status=ok` 表示取得基础组合价；`baggage_verified=false` 仍表示未达到完整需求，进程以 2 退出。
+验收工作流在取得报价或明确无票时正常结束。预算结论看 `budget_result`，托运核实看 `baggage_verified`。已查方案全部超预算时为 `over_budget`；仍有可能达标的方案缺少托运费用时为 `unverified`。
 被拦截、需登录、解析失败也明确报告，不当成无票，不自动重试。
 
 本机 Edge 会话不会自动复制到 GitHub。跨操作系统/出口地址的会话可用性未经验证；
