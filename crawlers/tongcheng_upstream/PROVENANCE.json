@@ -1,0 +1,53 @@
+{
+  "repository": "dengmeiluan/ticket-monitoring",
+  "commit": "5cfa6723f072dffb603724a23b7a2e13cf82c5d1",
+  "browser_methods": [
+    "__init__",
+    "user_data_dir",
+    "session_state_path",
+    "_read_session_state",
+    "session_saved_at",
+    "session_age_days",
+    "_write_session_state",
+    "_cookie_key",
+    "_restore_plan",
+    "_state_has_auth",
+    "_collect_state",
+    "_auth_gap_hint",
+    "_should_refresh_snapshot",
+    "_session_state_allowed",
+    "load_session_cookies",
+    "_ua",
+    "_viewport",
+    "_geo",
+    "fingerprint",
+    "_profile_wait_s",
+    "browser",
+    "login_window_size",
+    "_browser_context",
+    "new_page"
+  ],
+  "round_trip_methods": [
+    "_intl_rt_url",
+    "_parse_intl_rt_entry",
+    "_fetch_intl_rt"
+  ],
+  "changes": [
+    "isolate imports",
+    "extract browser/session methods and RT branch",
+    "omit unrelated schedulers, notifications, policy, scene dumps",
+    "restrict city helper to SHA/OSA"
+  ],
+  "upstream_sha256": {
+    "core/degraded.py": "29a5368c70715f09a585e7c2e87d2fd368f9ffb405035c937af8717a94c7d5ac",
+    "core/models.py": "22d3b09e9eca47e28dd21828a02244a2298570b22829def46b5f5e5efad982ea",
+    "core/yield_stats.py": "e2f67093643ff6cff8256a545b9883d355bdc8dc1da1198865aef4bf4c9b85c8",
+    "crawlers/base.py": "6aa8758f80c7b879ec4f82a6cf93c47ec3b72a39fb2d528661a519747d31638a",
+    "crawlers/captcha.py": "d9fdcec268ca8a707ca83df0103440dd733855d4ad31c54bd4e8572e3bf9d09d",
+    "crawlers/challenge.py": "847d82dab018a1630c535e8427f140025048540ee7668ab8c7ba83095add287a",
+    "crawlers/slider.py": "0237a94aa4c18de0223afbbf2c13f8dfba3f2045fc2c7f0565251314a3de0551",
+    "crawlers/stealth_ext.py": "dc6517d5988e1a67cf72c435c3fe0d58660c03338b9ec90475a64d90284a370a",
+    "crawlers/tongcheng.py": "475a797883cafde9e1d1e8b392f6036f1ce10c4d47773adca03daf88cc2d698f",
+    "core/android/ocr.py": "a28dc098b388955e3b205af08ee80ca9f8d1bb57d1c38efbe5932600f035c111"
+  }
+}

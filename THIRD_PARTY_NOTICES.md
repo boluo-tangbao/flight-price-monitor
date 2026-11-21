@@ -31,3 +31,22 @@ The homepage readiness guard independently follows upstream's risk-cookie names 
 separate-tab sequence; it stops before search when readiness is missing.
 Challenge solvers, profile files, credentials, scheduler, and automatic session
 snapshot writeback were not imported.
+
+The desktop entry URL and response field mapping in `crawlers/tongcheng_roundtrip.py`
+are adapted from `dengmeiluan/ticket-monitoring/crawlers/tongcheng.py`, Apache-2.0,
+commit `5cfa6723f072dffb603724a23b7a2e13cf82c5d1`. The pilot independently validates
+both dates, requires explicit `tp`, and uses a separate native browser profile.
+Source: https://github.com/dengmeiluan/ticket-monitoring/blob/5cfa6723f072dffb603724a23b7a2e13cf82c5d1/crawlers/tongcheng.py#L650
+
+
+Tongcheng desktop integration (`crawlers/tongcheng_pc.py` and
+`crawlers/tongcheng_upstream/`) uses the pinned upstream commit above.
+The isolated package retains the original browser/session methods, international
+round-trip query branch, challenge navigation guard, Slider/Solver handlers,
+stealth initialization, Windows OCR and necessary local helpers. See
+`crawlers/tongcheng_upstream/PROVENANCE.json` for source hashes and extracted methods.
+Changes: namespace isolation, SHA/OSA city scope, removal of unrelated production
+scheduling/policy/notification/scene-dump integration, safe response counters, and
+strict final acceptance of matching dates and explicit `tp`. The desktop profile
+and session snapshot remain local. Solver-triggered reloads are counted as extra
+search document requests; no live query is part of the offline integration.

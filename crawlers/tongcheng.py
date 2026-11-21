@@ -45,6 +45,10 @@ class TongchengCrawler(BaseCrawler):
         "DIG": "香格里拉", "TCZ": "腾冲",
     }
 
+    def fetch_round_trip(self, from_city, to_city, date, return_date):
+        from .tongcheng_roundtrip import fetch_round_trip
+        return fetch_round_trip(self, from_city, to_city, date, return_date)
+
     def login_url(self) -> str:
         return "https://m.ly.com/member/login.html"
 

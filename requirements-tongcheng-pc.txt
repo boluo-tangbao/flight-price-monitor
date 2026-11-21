@@ -1,0 +1,4 @@
+-r requirements.txt
+numpy>=1.26
+Pillow>=10.0
+# Optional: ddddocr for the upstream text/click detection backend.
