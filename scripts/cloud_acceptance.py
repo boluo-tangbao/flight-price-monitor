@@ -9,6 +9,7 @@ import os
 from main import load_config, build_routes
 from crawlers.ctrip import CtripCrawler
 from core.collection import FetchResult, collect
+from core.airlines import round_trip_airlines
 from core.baggage import baggage_total, lowest_round_trip_options
 
 
@@ -32,6 +33,7 @@ def main():
     rows = [{"ticket_from_price": q.price, "baggage_inclusive_total": total,
              "depart_date": q.depart_date, "return_date": q.return_date,
              "flight_no": q.flight_no, "return_flight_no": q.return_flight_no,
+             **round_trip_airlines(q),
              "price_basis": q.price_basis, "baggage_offer": q.baggage_offer,
              "source_url": q.source_url} for q, total in lowest_round_trip_options(result.prices)]
     ready = any(r["baggage_inclusive_total"] is not None for r in rows)

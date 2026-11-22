@@ -7,7 +7,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.collection import collect
-from core.baggage import baggage_total
+from core.airlines import round_trip_airlines
+from core.baggage import baggage_total, checked_baggage_labels
 from crawlers.tongcheng import TongchengCrawler
 from crawlers.tongcheng_roundtrip import desktop
 from main import build_routes, load_config
@@ -28,7 +29,7 @@ def main():
     crawler = TongchengCrawler({"headless": False, "timeout_seconds": 35,
                               "user_data_dir": args.user_data_dir,
                               "tongcheng_pc_browser_channel": args.browser_channel,
-                              "tongcheng_round_trip_fare_details": args.details,
+                              "tongcheng_round_trip_fare_details": args.details or bool(args.outbound_flight),
                               "tongcheng_detail_pair": [args.outbound_flight, args.return_flight]
                                   if args.outbound_flight else None},
                               logging.getLogger("tongcheng_acceptance"))
@@ -43,7 +44,9 @@ def main():
     print(json.dumps({"platform": "tongcheng", "status": result.status, "evidence": result.evidence,
                       "queries": getattr(crawler, "round_trip_searches", 0), "notifications_sent": False,
                       "diagnostics": getattr(crawler, "round_trip_diagnostics", {}),
-                      "quotes": [dict(quote.to_dict(), checked_baggage_total=baggage_total(quote))
+                      "quotes": [dict(quote.to_dict(), checked_baggage_total=baggage_total(quote),
+                                      checked_baggage=checked_baggage_labels(quote),
+                                      **round_trip_airlines(quote))
                                  for quote in result.prices]}, ensure_ascii=False))
     return 0 if result.status in ("ok", "empty") else 2
 

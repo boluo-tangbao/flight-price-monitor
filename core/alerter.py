@@ -2,13 +2,18 @@
 import logging
 from typing import List, Optional
 
+from .airlines import round_trip_flights_label
+from .baggage import baggage_total, checked_baggage_labels, lowest_round_trip_options
 from .models import FlightPrice, Route
+
+
+def _checked_baggage_line(quote):
+    labels = checked_baggage_labels(quote)
+    return f"去程托运 {labels['outbound']}；回程托运 {labels['inbound']}"
 
 
 class Alerter:
     def report_round_trip_options(self, route, depart, ret, result):
-        from .baggage import lowest_round_trip_options
-
         ranked = lowest_round_trip_options(result.prices)
         if not ranked:
             self.logger.info("[往返报价] %s/%s 本轮无可报告报价（%s）", depart, ret, result.status)
@@ -21,13 +26,13 @@ class Alerter:
 
         lines = []
         for index, (quote, total) in enumerate(ranked, 1):
-            flights = quote.flight_no + (f" / {quote.return_flight_no}" if quote.return_flight_no else "")
+            flights = round_trip_flights_label(quote)
             if total is not None:
                 label = f"含两程托运 ¥{total:,.2f}"
             else:
                 kind = "往返含税票价" if quote.price_basis == "selected_round_trip_tax" else "往返含税起价"
                 label = f"{kind} ¥{quote.price:,.2f}，托运费用待确认"
-            lines.append(f"{index}. {flights} · {label}")
+            lines.append(f"{index}. {flights} · {label} · {_checked_baggage_line(quote)}")
         title = f"{route.from_name}↔{route.to_name} 本轮未确认预算内方案"
         description = (f"去程 {depart} / 回程 {ret}，预算 ¥{route.alert_threshold:,.0f}。\n\n"
                        "本轮已查最低方案，已核实的含托运总价优先。\n\n"
@@ -43,7 +48,6 @@ class Alerter:
             return
         if route.checked_baggage_required:
             from dataclasses import replace
-            from .baggage import baggage_total
             total = baggage_total(quote)
             if total is None:
                 self.logger.info("[托运待确认] %s->%s %s/%s：两程托运与实际组合费用未核实，暂不触发低价提醒",
@@ -60,12 +64,13 @@ class Alerter:
         last = self.storage.get_alert_state(key)
         should_push, _ = self._should_push(quote.price, last)
         label = "往返含税含两程托运合计" if route.checked_baggage_required else "往返含税起价"
-        note = ("已核实去回程组合及两程托运费用，包含付费加购。" if route.checked_baggage_required else
+        note = (_checked_baggage_line(quote) if route.checked_baggage_required else
                 "返程具体航班尚未选定，支付价格请到平台核实。")
         if should_push and self.notifier.send(
                 f"{label} {route.from_name}↔{route.to_name} ¥{quote.price:.0f}",
                 f"去程 {quote.depart_date} / 回程 {quote.return_date}\n\n"
-                f"{label}：CNY {quote.price:.0f}（1成人经济舱）。"
+                f"{round_trip_flights_label(quote)}\n\n"
+                f"{label}：CNY {quote.price:.0f}（1成人经济舱）。\n"
                 f"{note}\n\n[查看往返]({quote.source_url})"):
             self.storage.set_alert_state(key, quote.price)
 

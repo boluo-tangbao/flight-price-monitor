@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock
 
 from core.alerter import Alerter
-from core.baggage import baggage_total
+from core.baggage import baggage_total, checked_baggage_labels
 from core.collection import FetchResult
 from core.models import RoundTripQuote, Route
 from crawlers.ctrip_fare_details import included_baggage, read_details
@@ -35,6 +35,11 @@ class FareTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(baggage_total(quote(2542, "MM079", body)))
 
+    def test_explicit_no_free_baggage_is_distinct_from_unknown(self):
+        no_free = RULES.replace("总重不超过20公斤", "无免费托运行李额")
+        self.assertEqual(checked_baggage_labels(quote(2542, "MM079", no_free))["outbound"], "无免费托运")
+        self.assertEqual(checked_baggage_labels(quote(2542))["outbound"], "待确认")
+
     def test_over_budget_reports_three_and_labels_unknown_as_lower_bound(self):
         route = Route("SHA", "上海", "OSA", "大阪", [], 2800, checked_baggage_required=True)
         notifier, storage = Mock(), Mock()
@@ -45,6 +50,9 @@ class FareTests(unittest.TestCase):
         notifier.send.assert_called_once()
         message = notifier.send.call_args.args[1]
         self.assertIn("含两程托运 ¥2,997.00", message)
+        self.assertIn("去程 春秋航空 9C6575 / 回程 乐桃航空 MM079", message)
+        self.assertIn("去程托运 票价已含（总重不超过20公斤）", message)
+        self.assertIn("回程托运 票价已含（每人1件,每件20公斤）", message)
         self.assertIn("含两程托运 ¥3,009.00", message)
         self.assertIn("¥3,600.00", message)
         self.assertNotIn("¥2,542.00", message)
@@ -52,6 +60,7 @@ class FareTests(unittest.TestCase):
         alerter.report_round_trip_options(route, "2027-02-15", "2027-02-22", FetchResult("ok", [
             quote(2997, "MM079", RULES), quote(2542)]))
         self.assertIn("¥2,542.00，托运费用待确认", notifier.send.call_args.args[1])
+        self.assertIn("去程托运 待确认；回程托运 待确认", notifier.send.call_args.args[1])
 
     def test_in_budget_sends_one_price_alert_instead_of_summary(self):
         route = Route("SHA", "上海", "OSA", "大阪", [], 2800, checked_baggage_required=True)
@@ -62,6 +71,8 @@ class FareTests(unittest.TestCase):
                 quote(3100, "9C6582", RULES), quote(2700, "MM079", RULES)]))
         notifier.send.assert_called_once()
         self.assertIn("¥2700", notifier.send.call_args.args[0])
+        self.assertIn("去程 春秋航空 9C6575 / 回程 乐桃航空 MM079", notifier.send.call_args.args[1])
+        self.assertIn("回程托运 票价已含（每人1件,每件20公斤）", notifier.send.call_args.args[1])
 
     @unittest.skipUnless(os.environ.get("RUN_OFFLINE_BROWSER_CHECK") == "1", "opt-in local Chromium fixture")
     def test_expanding_first_return_does_not_reindex_later_cards(self):
