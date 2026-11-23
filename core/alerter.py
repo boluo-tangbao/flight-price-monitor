@@ -9,7 +9,11 @@ from .models import FlightPrice, Route
 
 def _checked_baggage_line(quote):
     labels = checked_baggage_labels(quote)
-    return f"去程托运 {labels['outbound']}；回程托运 {labels['inbound']}"
+    line = f"去程托运 {labels['outbound']}；回程托运 {labels['inbound']}"
+    fare_rule = (quote.baggage_offer or {}).get("fare_rule")
+    if fare_rule and "待确认" in labels.values():
+        line = f"票面标注 {fare_rule} · {line}"
+    return line
 
 
 class Alerter:

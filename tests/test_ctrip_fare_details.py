@@ -1,13 +1,13 @@
 import logging
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from core.alerter import Alerter
 from core.baggage import baggage_total, checked_baggage_labels
-from core.collection import FetchResult
+from core.collection import FetchFailure, FetchResult
 from core.models import RoundTripQuote, Route
-from crawlers.ctrip_fare_details import included_baggage, read_details
+from crawlers.ctrip_fare_details import _table_baggage, included_baggage, read_details
 from crawlers.ctrip_roundtrip import check_access
 
 
@@ -24,6 +24,42 @@ def quote(price, inbound="", rules=""):
 
 
 class FareTests(unittest.TestCase):
+    def test_shared_table_requires_structurally_shared_directions(self):
+        page = Mock()
+        page.evaluate.return_value = [["上海 — 大阪\n大阪 — 上海", "托运：每人2件,每件23公斤"]]
+        self.assertEqual({key: item["pieces"] for key, item in _table_baggage(page).items()},
+                         {"outbound": 2, "inbound": 2})
+        page.evaluate.return_value = [["大阪 — 上海", "托运：每人2件,每件23公斤"]]
+        self.assertEqual(_table_baggage(page), {})
+
+    def test_first_return_timeout_does_not_discard_other_baggage_rules(self):
+        from playwright.sync_api import TimeoutError
+
+        page = Mock(url="https://flights.ctrip.com/")
+        outbound, timed_out, available = Mock(), Mock(), Mock()
+        timed_out.get_by_text.return_value.click.side_effect = TimeoutError("fixture")
+        popup = "行李规定\n" + RULES.removeprefix("行李规定        ").replace(" — ", " - ")
+        link = Mock()
+        link.count.return_value = 1
+        link.hover.side_effect = lambda **_: setattr(page.inner_text, "return_value", popup)
+        page.inner_text.return_value = ""
+        fare = Mock()
+        fare.inner_text.return_value = "¥2700"
+        fare.get_by_text.return_value = link
+        fares = available.locator.return_value.filter.return_value.locator.return_value
+        fares.count.return_value = 1
+        fares.all.return_value = [fare]
+        diagnostics = {"expanded_return_options": 0}
+        cards = [[(2500, "9C6575", outbound)], [(2542, "NH416", timed_out), (2700, "MM079", available)]]
+        with patch("crawlers.ctrip_fare_details._flight_cards", side_effect=cards), self.assertRaises(FetchFailure) as err:
+            read_details(page, [quote(2500)], Mock(), diagnostics)
+        self.assertEqual(str(err.exception), "fare_details_expand_return_timeout")
+        quotes = {q.return_flight_no: q for q in err.exception.prices}
+        self.assertIsNone(baggage_total(quotes["NH416"]))
+        self.assertEqual(baggage_total(quotes["MM079"]), 2700)
+        self.assertEqual(quotes["MM079"].baggage_offer["outbound"]["weight_kg"], 20)
+        self.assertEqual(quotes["MM079"].baggage_offer["inbound"]["pieces"], 1)
+
     def test_two_directions_with_checked_allowance_match_same_fare(self):
         self.assertEqual(baggage_total(quote(2997, "MM079", RULES)), 2997)
 
