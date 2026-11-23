@@ -10,7 +10,8 @@ from unittest.mock import Mock, patch
 from core.baggage import baggage_total, lowest_round_trip_options
 from core.models import RoundTripQuote
 from crawlers.tongcheng_fare_details import (
-    adult_checked_rule, fare_checked_baggage, fare_price, flight_pattern, read_details, select_pair,
+    _panel_baggage, _table_baggage, adult_checked_rule, fare_checked_baggage,
+    fare_price, flight_pattern, read_details, select_pair,
 )
 from core.collection import FetchFailure
 from crawlers.tongcheng_pc import TongchengDesktop
@@ -69,6 +70,88 @@ class TongchengDetailTests(unittest.TestCase):
             '去\n免费托运行李额20KG\n返：提供行程单\n手提行李额7KG'
         )
         self.assertEqual(set(legs), {'outbound'})
+
+    def test_baggage_table_uses_checked_cells_and_preserves_direction_scope(self):
+        rows = [
+            ['类别', '去程\n上海 - 大阪', '返程\n大阪 - 上海'],
+            ['手提', '5KG', '7KG'],
+            ['托运', '20KG/人', '免费2件, 每件23KG'],
+        ]
+        both = _table_baggage(rows)
+        self.assertEqual(both['outbound']['weight_kg'], 20)
+        self.assertEqual((both['inbound']['pieces'], both['inbound']['weight_kg']), (2, 23))
+        vertical = _table_baggage([['方向', '手提', '托运'], ['去', '5kg', '20kg'], ['返', '7kg', '0kg']])
+        self.assertEqual(vertical['outbound']['weight_kg'], 20)
+        self.assertTrue(vertical['inbound']['no_free'])
+        scoped = [['类别', '成人', '儿童'], ['托运', '20KG', '10KG']]
+        self.assertEqual(_table_baggage(scoped), {})
+        self.assertEqual(_table_baggage(scoped, 'inbound')['inbound']['weight_kg'], 20)
+        self.assertEqual(_table_baggage([['类别', '儿童'], ['托运', '10KG']], 'outbound'), {})
+
+    @unittest.skipUnless(os.environ.get("RUN_TONGCHENG_OFFLINE_BROWSER_CHECK") == "1",
+                         "opt-in local Edge fixture")
+    def test_clicking_baggage_link_reads_the_new_table_not_an_existing_one(self):
+        from playwright.sync_api import sync_playwright
+        import time
+
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(channel='msedge', headless=True,
+                proxy={'server': 'http://127.0.0.1:9'}, args=['--disable-background-networking'])
+            try:
+                page = browser.new_page()
+                page.route('**/*', lambda route: route.abort())
+                page.set_content('''
+                    <table><tr><th>项目</th><th>去</th><th>返</th></tr>
+                    <tr><td>托运</td><td>99kg</td><td>99kg</td></tr></table>
+                    <div class="pro-item-box">
+                      <button onclick="document.body.dataset.purchased='true'">加购托运行李额</button>
+                      <a href="#rules" onclick="document.querySelector('#rules').hidden=false; return false">
+                        <span>查看行李额</span></a>
+                    </div>
+                    <table id="rules" hidden>
+                      <tr><th>项目</th><th>去</th><th>返</th></tr>
+                      <tr><td>手提</td><td>5kg</td><td>7kg</td></tr>
+                      <tr><td>托运</td><td>20kg</td><td>15kg</td></tr>
+                    </table>
+                ''')
+
+                def wait(read, seconds):
+                    deadline = time.monotonic() + seconds
+                    while True:
+                        result = read()
+                        if result or time.monotonic() >= deadline:
+                            return result
+                        page.wait_for_timeout(50)
+
+                diagnostics = {}
+                legs = _panel_baggage(page, page.locator('.pro-item-box'), wait, diagnostics, lambda *_: None)
+                self.assertEqual({key: value['weight_kg'] for key, value in legs.items()},
+                                 {'outbound': 20, 'inbound': 15})
+                self.assertEqual(legs['inbound']['source'], 'table')
+                self.assertEqual(diagnostics['detail_baggage_tables'], 1)
+                self.assertIsNone(page.locator('body').get_attribute('data-purchased'))
+
+                context = browser.new_context()
+                def serve(route):
+                    document = {
+                        '/fixture': '<div class="pro-item-box"><a href="/rules">行李额</a></div>',
+                        '/rules': ('<table><tr><th>类别</th><th>去程</th><th>回程</th></tr>'
+                                   '<tr><td>托运</td><td colspan="2">23KG</td></tr></table>'),
+                    }.get(route.request.url.removeprefix('https://www.ly.com'))
+                    if document:
+                        route.fulfill(body=document, content_type='text/html; charset=utf-8')
+                    else:
+                        route.abort()
+
+                context.route('**/*', serve)
+                page = context.new_page()
+                page.goto('https://www.ly.com/fixture')
+                legs = _panel_baggage(page, page.locator('.pro-item-box'), wait, {}, lambda *_: None)
+                self.assertEqual({key: value['weight_kg'] for key, value in legs.items()},
+                                 {'outbound': 23, 'inbound': 23})
+                self.assertEqual(len(context.pages), 1)
+            finally:
+                browser.close()
 
     @unittest.skipUnless(os.environ.get("RUN_TONGCHENG_OFFLINE_BROWSER_CHECK") == "1",
                          "opt-in local Edge fixture")

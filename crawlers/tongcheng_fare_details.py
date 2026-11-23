@@ -1,9 +1,11 @@
 """Inspect selected Tongcheng fare cards and both direction tabs; never book."""
+from collections import Counter
 from dataclasses import replace
 import json
 import re
 import time
 import unicodedata
+from urllib.parse import urljoin, urlsplit
 
 from playwright.sync_api import TimeoutError as BrowserTimeout
 from core.baggage import baggage_total
@@ -25,6 +27,13 @@ EACH_LEG = re.compile(r"^(?:往返两程|往返|去返两程|去返程|去回程
 LEG_PREFIX = re.compile(
     r"^(去程|回程|返程|[去返](?=$|[\s:：]|退改|提供|免费|无免费|不含|托运|行李额))\s*[:：]?\s*")
 POPUP = '[role="tooltip"]:visible, .v-popover_box:visible, [role="dialog"]:visible'
+CHECKED_HEADING = re.compile(rf"^{CHECKED_LABEL}\s*[:：]?$")
+BAGGAGE_CONTROLS = (
+    'a:visible, button:visible, [role="link"]:visible, [role="button"]:visible, '
+    '.v-popover__reference:visible:not(:has(a, button, [role="link"], [role="button"]))'
+)
+BAGGAGE_LINK = re.compile(r"行李(?:规定|规则|\s*额)|托运")
+BAGGAGE_PURCHASE = re.compile(r"预订|加购|购买|支付")
 ACTION_MS = 3500
 
 
@@ -134,34 +143,196 @@ def fare_checked_baggage(text):
             {key: dict(rule, source="fare") for key, rule in legs.items() if key not in ambiguous})
 
 
-def _panel_baggage(page, fare, wait, diagnostics):
-    popup = page.locator(POPUP).filter(has_text=re.compile(r"行李(?:规定|规则)"))
-    visible = page.locator(":visible")
-    link = fare.get_by_text(FARE_BAGGAGE_TEXT).and_(visible)
-    if link.count() != 1:
-        link = fare.get_by_text(re.compile(r"^行李(?:规定|规则)$")).and_(visible)
-    if link.count() != 1:
+def _direction(text):
+    matches = {key for line in text.splitlines() for key, pattern in DIRECTIONS.items()
+               if pattern.fullmatch(line.strip())}
+    return matches.pop() if len(matches) == 1 else None
+
+
+def _table_allowance(value):
+    value = unicodedata.normalize("NFKC", value).strip()
+    if re.fullmatch(r"(?:无|不含|0\s*(?:kg|公斤|件))", value, re.I):
+        return {"rule": "无免费托运", "no_free": True}
+    return checked_allowance(re.sub(r"^免费\s*|\s*/\s*人$", "", value))
+
+
+def _table_baggage(rows, direction=None):
+    """Read checked-baggage cells only where headings identify their scope."""
+    legs, conflicts = {}, set()
+    columns = {}
+    adult_columns = None
+    checked_column = None
+
+    def add(key, value):
+        rule = _table_allowance(value)
+        if key and rule:
+            if key in legs and legs[key] != rule:
+                conflicts.add(key)
+            legs[key] = rule
+
+    for row in rows:
+        labels = {i: key for i, value in enumerate(row) if (key := _direction(value))}
+        checked = [i for i, value in enumerate(row) if CHECKED_HEADING.fullmatch(value)]
+        if not checked and not labels and any(value in ("成人", "儿童", "婴儿") for value in row):
+            adult_columns = {i for i, value in enumerate(row) if value == "成人"}
+        if len(labels) >= 2 and len(set(labels.values())) == 2:
+            columns = labels
+        if len(checked) == 1:
+            index = checked[0]
+            if any(value in ("儿童", "婴儿") for value in row[:index]):
+                continue
+            if columns:
+                for column, key in columns.items():
+                    if index < column < len(row) and (adult_columns is None or column in adult_columns):
+                        add(key, row[column])
+            elif labels:
+                if len(set(labels.values())) == 1 and len(row) == index + 2:
+                    add(next(iter(labels.values())), row[index + 1])
+            elif adult_columns is not None:
+                for column in adult_columns:
+                    if index < column < len(row):
+                        add(direction, row[column])
+            elif len(row) == index + 2:
+                add(direction, row[index + 1])
+            if not any(_table_allowance(value) for value in row[index + 1:]):
+                checked_column = index
+        elif (checked_column is not None and len(labels) == 1 and checked_column < len(row)
+              and not any(value in ("儿童", "婴儿") for value in row)):
+            add(next(iter(labels.values())), row[checked_column])
+    return {key: dict(rule, source="table") for key, rule in legs.items() if key not in conflicts}
+
+
+def _visible_checked_tables(page):
+    # Expand merged cells before pairing the 托运 row with the go/return headers.
+    return [tuple(map(tuple, rows)) for rows in page.locator("table:visible").evaluate_all("""tables =>
+        tables.filter(table => !table.querySelector('table')).map(table => {
+            const grid = [];
+            const rows = Array.from(table.rows).filter(row => row.getClientRects().length);
+            for (let r = 0; r < rows.length; r++) {
+                grid[r] ??= [];
+                let c = 0;
+                for (const cell of rows[r].cells) {
+                    if (!cell.getClientRects().length) continue;
+                    while (grid[r][c] !== undefined) c++;
+                    const text = cell.innerText.trim();
+                    const end = Math.min(rows.length, r + Math.max(1, cell.rowSpan));
+                    for (let i = r; i < end; i++) {
+                        grid[i] ??= [];
+                        for (let j = c; j < c + cell.colSpan; j++) grid[i][j] = text;
+                    }
+                    c += cell.colSpan;
+                }
+            }
+            return grid.map(row => Array.from(row, cell => cell ?? ''));
+        })""") if any(CHECKED_HEADING.fullmatch(cell) for row in rows for cell in row)]
+
+
+def _rules_from_tables(tables, direction=None):
+    result, conflicts = {}, set()
+    for rows in tables:
+        for key, rule in _table_baggage(rows, direction).items():
+            if key in result and result[key] != rule:
+                conflicts.add(key)
+            result[key] = rule
+    return {key: rule for key, rule in result.items() if key not in conflicts}
+
+
+def _baggage_controls(fare):
+    # Match the clickable parent even when only a nested span contains 行李额.
+    return fare.locator(BAGGAGE_CONTROLS).filter(
+        has_text=BAGGAGE_LINK, has_not_text=BAGGAGE_PURCHASE)
+
+
+def _link_direction(link):
+    ancestry = link.evaluate("""el => {
+        const texts = [];
+        for (let node = el; node && !node.matches('.pro-item-box'); node = node.parentElement)
+            texts.push(node.innerText || '');
+        return texts;
+    }""", timeout=ACTION_MS)
+    for text in ancestry:
+        directions = {match[1][0] for line in text.splitlines() if (match := LEG_PREFIX.match(line.strip()))}
+        mapped = {"outbound" if token == "去" else "inbound" for token in directions}
+        if len(mapped) == 1:
+            return mapped.pop()
+        if mapped:
+            return None
+    return None
+
+
+def _linked_baggage_rules(page, link, direction, wait, diagnostics, check_access):
+    href = link.get_attribute("href", timeout=ACTION_MS)
+    if not href:
         return {}
-    # Reject a lingering or ambiguous panel instead of using another fare's rule.
+    url = urljoin(page.url, href)
+    target = urlsplit(url)
+    host = target.hostname or ""
+    if (target.scheme != "https" or not (host == "ly.com" or host.endswith(".ly.com"))
+            or target.username is not None or target.password is not None):
+        return {}
+    detail = page.context.new_page()
+    try:
+        response = detail.goto(url, wait_until="domcontentloaded", timeout=ACTION_MS)
+
+        def tables_ready():
+            check_access(detail.url, detail.inner_text("body", timeout=ACTION_MS),
+                         response.status if response else None)
+            return _visible_checked_tables(detail)
+
+        tables = wait(tables_ready, 3) or []
+        diagnostics["detail_baggage_tables"] = diagnostics.get("detail_baggage_tables", 0) + len(tables)
+        return _rules_from_tables(tables, direction)
+    finally:
+        detail.close()
+
+
+def _open_baggage_rules(page, link, popup, wait, diagnostics, check_access):
+    if BAGGAGE_PURCHASE.search(link.inner_text(timeout=ACTION_MS)):
+        return {}
     page.mouse.move(0, 0)
-    if not wait(lambda: popup.count() == 0, 1.5):
-        return {}
+    wait(lambda: popup.count() == 0, 1)
+    prior = Counter(_visible_checked_tables(page))
+    old_popup = popup.count()
+    direction = _link_direction(link)
+
+    def new_tables():
+        return list((Counter(_visible_checked_tables(page)) - prior).elements())
+
+    def opened():
+        return bool(new_tables() or (old_popup == 0 and popup.count() == 1))
+
     link.hover(timeout=ACTION_MS)
-    opened = wait(lambda: popup.count() == 1, 2)
-    if not opened:
-        control = link.and_(page.locator('a:not([href]), a[href="#"], .v-popover__reference, [role="button"]'))
-        if popup.count() != 0 or control.count() != 1:
-            return {}
+    if not wait(opened, 2):
+        # Only activate an in-page baggage control. Its description may be a
+        # nested child of a hash link, an actual button or the popup reference.
+        control = link.and_(page.locator(
+            'a:not([href]), a[href^="#"], a[href="javascript:void(0)"], a[href="javascript:void(0);"], '
+            'a[href="javascript:;"], button, '
+            '[role="button"], .v-popover__reference'))
+        if control.count() != 1:
+            return _linked_baggage_rules(page, link, direction, wait, diagnostics, check_access)
         control.click(timeout=ACTION_MS)
-        if not wait(lambda: popup.count() == 1, 2):
+        if not wait(opened, 3):
             return {}
+
+    tables = new_tables()
+    if not tables and old_popup == 0 and popup.count() == 1:
+        # Some dialogs insert their table after the title becomes visible.
+        wait(lambda: new_tables() or (popup.count() == 1 and
+             adult_checked_rule(popup.inner_text(timeout=ACTION_MS))), 2)
+        tables = new_tables()
+    diagnostics["detail_baggage_tables"] = diagnostics.get("detail_baggage_tables", 0) + len(tables)
+    legs = _rules_from_tables(tables, direction)
+    if len(legs) == 2 or old_popup or popup.count() != 1:
+        return legs
 
     # An explicit all-directions or per-direction statement is usable even
     # when the popover has no direction controls.
     panel_text = popup.inner_text(timeout=ACTION_MS)
     adult = re.search(r"^成人[^\S\n]*\n(.*?)(?=^(?:儿童|婴儿)\s*$|\Z)",
                       panel_text, re.M | re.S)
-    _, legs = fare_checked_baggage(adult[1]) if adult else ("", {})
+    if adult:
+        legs.update(fare_checked_baggage(adult[1])[1])
     tabs = popup.locator('.crumb-item:visible, [role="tab"]:visible')
     active = popup.locator('.crumb-item.active:visible, [role="tab"][aria-selected="true"]:visible')
     for key, pattern in DIRECTIONS.items():
@@ -173,7 +344,8 @@ def _panel_baggage(page, fare, wait, diagnostics):
         def active_rule():
             if active.count() != 1 or not pattern.fullmatch(active.inner_text(timeout=ACTION_MS).strip()):
                 return None
-            return adult_checked_rule(popup.inner_text(timeout=ACTION_MS)) or None
+            return (_rules_from_tables(new_tables(), key).get(key)
+                    or adult_checked_rule(popup.inner_text(timeout=ACTION_MS)) or None)
 
         try:
             if not active.filter(has_text=pattern).count():
@@ -182,7 +354,23 @@ def _panel_baggage(page, fare, wait, diagnostics):
         except BrowserTimeout:
             continue
         if rule:
-            legs[key] = dict(rule, source="panel")
+            legs[key] = {"source": "panel", **rule}
+    return legs
+
+
+def _panel_baggage(page, fare, wait, diagnostics, check_access):
+    popup = page.locator(POPUP).filter(has_text=re.compile(r"行李(?:规定|规则)|托运"))
+    controls = _baggage_controls(fare)
+    if not controls.count():
+        controls = fare.get_by_text(BAGGAGE_LINK).and_(page.locator(":visible"))
+    legs = {}
+    for link in controls.all()[:2]:
+        try:
+            legs.update(_open_baggage_rules(page, link, popup, wait, diagnostics, check_access))
+        except BrowserTimeout:
+            diagnostics["detail_baggage_timeout"] = True
+        if len(legs) == 2:
+            break
     return legs
 
 
@@ -269,9 +457,9 @@ def read_details(page, fallback, check_access, diagnostics, preferred_pair=None)
         check()
         diagnostics['detail_stage'] = 'baggage_popup'
         note, legs = fare_checked_baggage(text)
-        if len(legs) != 2:
+        if len(legs) != 2 or _baggage_controls(fare).count():
             try:
-                legs.update(_panel_baggage(page, fare, wait, diagnostics))
+                legs.update(_panel_baggage(page, fare, wait, diagnostics, check_access))
             except BrowserTimeout:
                 diagnostics['detail_baggage_timeout'] = True
         offer = {'itinerary_confirmed': True, 'tax_inclusive_ticket_confirmed': True,
