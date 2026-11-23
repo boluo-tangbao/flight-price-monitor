@@ -23,7 +23,7 @@ from typing import Any, List, Optional
 
 import httpx
 
-from core.models import FlightPrice
+from core.models import FlightPrice, RoundTripQuote
 from .base import BaseCrawler
 
 UA = (
@@ -58,6 +58,11 @@ class FliggyCrawler(BaseCrawler):
 
     def login_url(self) -> str:
         return "https://login.taobao.com/member/login.jhtml"
+
+    def fetch_round_trip(self, from_city: str, to_city: str, depart: str, back: str) -> List[RoundTripQuote]:
+        from .fliggy_roundtrip import fetch_round_trip
+
+        return fetch_round_trip(self, from_city, to_city, depart, back)
 
     def _rate_acquire(self):
         while True:

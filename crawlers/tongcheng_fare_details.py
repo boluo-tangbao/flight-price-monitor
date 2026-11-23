@@ -11,6 +11,7 @@ from playwright.sync_api import TimeoutError as BrowserTimeout
 from core.baggage import baggage_total, checked_baggage_labels
 from core.collection import FetchFailure
 from core.models import RoundTripQuote
+from .fare_tables import visible_table_rows
 
 
 CHECKED_LABEL = r"(?:每人\s*可\s*)?(?:免费\s*)?托运(?:\s*行李)?(?:\s*(?:额度|额))?"
@@ -219,28 +220,8 @@ def _table_baggage(rows, direction=None):
 
 
 def _visible_checked_tables(page):
-    # Expand merged cells before pairing the 托运 row with the go/return headers.
-    return [tuple(map(tuple, rows)) for rows in page.locator("table:visible").evaluate_all("""tables =>
-        tables.filter(table => !table.querySelector('table')).map(table => {
-            const grid = [];
-            const rows = Array.from(table.rows).filter(row => row.getClientRects().length);
-            for (let r = 0; r < rows.length; r++) {
-                grid[r] ??= [];
-                let c = 0;
-                for (const cell of rows[r].cells) {
-                    if (!cell.getClientRects().length) continue;
-                    while (grid[r][c] !== undefined) c++;
-                    const text = cell.innerText.trim();
-                    const end = Math.min(rows.length, r + Math.max(1, cell.rowSpan));
-                    for (let i = r; i < end; i++) {
-                        grid[i] ??= [];
-                        for (let j = c; j < c + cell.colSpan; j++) grid[i][j] = text;
-                    }
-                    c += cell.colSpan;
-                }
-            }
-            return grid.map(row => Array.from(row, cell => cell ?? ''));
-        })""") if any(CHECKED_HEADING.fullmatch(cell) for row in rows for cell in row)]
+    return [table for table in visible_table_rows(page)
+            if any(CHECKED_HEADING.fullmatch(cell) for row in table for cell in row)]
 
 
 def _rules_from_tables(tables, direction=None):

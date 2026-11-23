@@ -50,3 +50,12 @@ scheduling/policy/notification/scene-dump integration, safe response counters, a
 strict final acceptance of matching dates and explicit `tp`. The desktop profile
 and session snapshot remain local. Solver-triggered reloads are counted as extra
 search document requests; no live query is part of the offline integration.
+
+The international calendar request and date/price fields in
+`crawlers/fliggy_roundtrip.py` are adapted from
+`dengmeiluan/ticket-monitoring/crawlers/fliggy.py` under Apache-2.0,
+commit `658ae9c9d50f8af656208fd972580752e349d844`.
+https://github.com/dengmeiluan/ticket-monitoring/blob/658ae9c9d50f8af656208fd972580752e349d844/crawlers/fliggy.py#L429
+
+The adapter validates both requested dates, separates calendar prices from
+verified fare details, and reports access refusals directly.

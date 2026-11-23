@@ -8,7 +8,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.collection import collect, FetchResult
+from core.collection import collect, FetchFailure, FetchResult
 from core.round_trip_comparison import compare_round_trips, comparison_settings, validate_comparison_route
 from crawlers import REGISTRY
 from main import build_routes, load_config
@@ -17,7 +17,7 @@ from main import build_routes, load_config
 def run_comparison(route, crawler_config, providers, logger):
     depart, back = route.dates[0], route.return_dates[0]
     results = {}
-    tongcheng_diagnostics = None
+    diagnostics = {}
     for provider in providers:
         crawler_class = REGISTRY[provider]
         if not callable(getattr(crawler_class, "fetch_round_trip", None)):
@@ -25,11 +25,12 @@ def run_comparison(route, crawler_config, providers, logger):
             continue
         crawler = crawler_class(dict(crawler_config), logger)
         results[provider] = collect(crawler, route.from_code, route.to_code, depart, back)
-        if provider == "tongcheng":
-            tongcheng_diagnostics = getattr(crawler, "round_trip_diagnostics", None)
+        details = getattr(crawler, "round_trip_diagnostics", None)
+        if isinstance(details, dict):
+            diagnostics[provider] = details
     report = compare_round_trips(route, depart, back, results)
-    if isinstance(tongcheng_diagnostics, dict):
-        report["platforms"]["tongcheng"]["diagnostics"] = tongcheng_diagnostics
+    for provider, details in diagnostics.items():
+        report["platforms"][provider]["diagnostics"] = details
     return report
 
 
@@ -40,24 +41,44 @@ def main():
                         help="Override comparison.platforms for just this run")
     parser.add_argument("--ctrip-channel", choices=["chromium", "chrome", "msedge"])
     parser.add_argument("--tongcheng-channel", choices=["chrome", "msedge"])
+    parser.add_argument("--fliggy-channel", choices=["chromium", "chrome", "msedge"])
+    fliggy_mode = parser.add_mutually_exclusive_group()
+    fliggy_mode.add_argument("--fliggy-calendar-only", action="store_true",
+                             help="Query Fliggy's date-level calendar for diagnosis")
+    fliggy_mode.add_argument("--fliggy-login", action="store_true",
+                             help="Open the Fliggy desktop profile for manual sign-in")
     parser.add_argument("--diagnostics", action="store_true",
                         help="Show unverified list prices and detailed fare collection records")
     args = parser.parse_args()
     cfg = load_config(args.config)
     routes = build_routes(cfg)
     try:
-        validate_comparison_route(routes)
-        providers, config = comparison_settings(cfg, REGISTRY, args.platforms)
+        if not args.fliggy_login:
+            validate_comparison_route(routes)
+        providers, config = comparison_settings(cfg, REGISTRY, ["fliggy"] if args.fliggy_login else args.platforms)
     except ValueError as error:
         parser.error(str(error))
     if args.tongcheng_channel:
         config["tongcheng_pc_browser_channel"] = args.tongcheng_channel
+    if args.fliggy_channel:
+        config["fliggy_pc_browser_channel"] = args.fliggy_channel
+    if args.fliggy_calendar_only:
+        config["fliggy_calendar_only"] = True
     profile_root = Path(config.get("user_data_dir", "user_data"))
     if not profile_root.is_absolute():
         config["user_data_dir"] = str(ROOT / profile_root)
     if args.ctrip_channel:
         config["pc_browser_channel"] = args.ctrip_channel
     logging.basicConfig(level=logging.CRITICAL)
+    if args.fliggy_login:
+        from crawlers.fliggy_roundtrip import interactive_login
+
+        try:
+            interactive_login(REGISTRY["fliggy"](config, logging.getLogger("fliggy_login")))
+        except FetchFailure as failure:
+            print(f"[{failure.status}] {failure}", file=sys.stderr)
+            return 2
+        return 0
     report = run_comparison(routes[0], config, providers,
                             logging.getLogger("round_trip_comparison"))
     if not args.diagnostics:
