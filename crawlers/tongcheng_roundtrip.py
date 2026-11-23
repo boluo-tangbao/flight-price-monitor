@@ -153,7 +153,8 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
                 return read_details(page, fallback, check_access, diagnostics,
                                     preferred_pair=crawler.config.get('tongcheng_detail_pair'))
             except FetchFailure as error:
-                error.prices = sorted(error.prices, key=lambda q: q.price)[:3]
+                error.prices = sorted(error.prices, key=lambda q: (
+                    q.price_basis != "selected_round_trip_tax", q.price))[:3]
                 raise
             except BrowserError as error:
                 status = 'timeout' if 'timeout' in type(error).__name__.lower() else 'error'
@@ -179,6 +180,13 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
     if worker.last_outcome == "timeout":
         raise FetchFailure("timeout", "tongcheng_navigation_timeout")
     if hasattr(worker, 'detail_quotes'):
+        if crawler.config.get("tongcheng_keep_list_quotes") is True:
+            detailed = {(quote.flight_no, quote.return_flight_no, quote.price)
+                        for quote in worker.detail_quotes}
+            listed = sorted((quote for quote in quotes.values()
+                             if (quote.flight_no, quote.return_flight_no, quote.price) not in detailed),
+                            key=lambda quote: quote.price)[:3]
+            return worker.detail_quotes + listed
         return worker.detail_quotes
     if quotes:
         return sorted(quotes.values(), key=lambda quote: quote.price)[:3]

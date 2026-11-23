@@ -21,6 +21,7 @@ from core.notifier import build_notifier
 from crawlers import REGISTRY
 from core.collection import collect, FetchFailure
 from core.health import HealthMonitor
+from core.round_trip_comparison import compare_round_trips, comparison_settings, validate_comparison_route
 from datetime import date as Date
 
 
@@ -57,11 +58,14 @@ def build_routes(cfg: dict):
     return routes
 
 
-def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter):
+def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comparison=False):
     crawler_cfg = cfg.get("crawler", {})
     platforms = cfg.get("platforms", ["ctrip", "fliggy", "tongcheng"])
     routes = build_routes(cfg)
-    health = HealthMonitor(storage, alerter.notifier, cfg.get("health"))
+    if comparison:
+        validate_comparison_route(routes)
+        platforms, crawler_cfg = comparison_settings(cfg, REGISTRY)
+    health = HealthMonitor(storage, None if comparison else alerter.notifier, cfg.get("health"))
 
     crawlers = []
     for name in platforms:
@@ -75,6 +79,7 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter):
         logger.info("===== 开始一轮抓取 =====")
         for route in routes:
             all_prices = []
+            round_results = {}
             for c in crawlers:
                 for date in route.dates:
                     for ret in (route.return_dates or [""]):
@@ -86,7 +91,9 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter):
                         if ret:
                             for quote in result.prices:
                                 health.save_round_trip(quote)
-                            if route.checked_baggage_required and crawler_cfg.get("round_trip_fare_details") is True:
+                            if comparison:
+                                round_results[c.name] = result
+                            elif route.checked_baggage_required and crawler_cfg.get("round_trip_fare_details") is True:
                                 alerter.report_round_trip_options(route, str(date), ret, result)
                             else:
                                 for quote in result.prices:
@@ -94,7 +101,11 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter):
                         else:
                             storage.save_many(result.prices)
                             all_prices.extend(result.prices)
-            alerter.check_and_alert(route, all_prices)
+            if comparison:
+                report = compare_round_trips(route, route.dates[0], route.return_dates[0], round_results)
+                alerter.report_joint_round_trip(route, report)
+            else:
+                alerter.check_and_alert(route, all_prices)
         health.notify()
         logger.info("===== 本轮抓取结束 =====")
 
@@ -105,6 +116,7 @@ def main():
     ap = argparse.ArgumentParser(description="机票价格监控工具")
     ap.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
     ap.add_argument("--once", action="store_true", help="只运行一次后退出")
+    ap.add_argument("--compare", action="store_true", help="按 comparison 配置做多平台联合监控")
     ap.add_argument("--browser-channel", choices=["chromium", "chrome", "msedge"],
                     help="携程电脑版使用的浏览器；登录和采集使用相同选项")
     ap.add_argument("--login", metavar="PLATFORM",
@@ -118,6 +130,8 @@ def main():
     cfg = load_config(str(cfg_path))
     if args.browser_channel:
         cfg.setdefault("crawler", {})["pc_browser_channel"] = args.browser_channel
+        if args.compare:
+            cfg.setdefault("comparison", {}).setdefault("crawler", {})["pc_browser_channel"] = args.browser_channel
     if os.environ.get("SERVERCHAN_SEND_KEY"):
         sc = cfg.setdefault("notifier", {}).setdefault("serverchan", {})
         sc.update(enabled=True, send_key=os.environ["SERVERCHAN_SEND_KEY"])
@@ -157,7 +171,10 @@ def main():
         push_rise_min=float(notify_cfg.get("push_rise_min", 50)),
     )
 
-    job = make_job(cfg, logger, storage, alerter)
+    try:
+        job = make_job(cfg, logger, storage, alerter, comparison=args.compare)
+    except ValueError as error:
+        ap.error(str(error))
 
     if args.once:
         job()
@@ -167,10 +184,14 @@ def main():
     interval = int(sched_cfg.get("interval_minutes", 30))
     jitter = int(sched_cfg.get("jitter_minutes", 0))
     run_on_start = bool(sched_cfg.get("run_on_start", True))
-    logger.info("启动定时调度，每 %d 分钟一次 (±%d 分钟随机扰动, 首次立即运行=%s)",
-                interval, jitter, run_on_start)
+    daily_times = (cfg.get("comparison") or {}).get("times") if args.compare else None
+    if daily_times:
+        logger.info("启动联合监控，上海时间 %s，首次立即运行=%s", ", ".join(daily_times), run_on_start)
+    else:
+        logger.info("启动定时调度，每 %d 分钟一次 (±%d 分钟随机扰动, 首次立即运行=%s)",
+                    interval, jitter, run_on_start)
     try:
-        run_scheduler(job, interval, run_on_start, jitter_minutes=jitter)
+        run_scheduler(job, interval, run_on_start, jitter_minutes=jitter, daily_times=daily_times)
     except (KeyboardInterrupt, SystemExit):
         logger.info("收到退出信号，停止监控")
 

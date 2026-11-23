@@ -1,18 +1,28 @@
 """基于 APScheduler 的定时调度（支持随机扰动间隔）"""
 import logging
 import random
+from datetime import time
 from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.combining import OrTrigger
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 
 def run_scheduler(job, interval_minutes: int, run_on_start: bool = True,
-                  jitter_minutes: int = 0):
+                  jitter_minutes: int = 0, *, daily_times=None):
     """
     interval_minutes: 基础间隔(分钟)
     jitter_minutes:   每次执行额外的随机扰动(±jitter)，降低被风控识别为定时任务的概率
     """
     sched = BlockingScheduler(timezone="Asia/Shanghai")
     logger = logging.getLogger("jipiao")
+    if daily_times:
+        times = [time.fromisoformat(value) for value in daily_times]
+        trigger = OrTrigger([CronTrigger(hour=value.hour, minute=value.minute,
+                                         timezone=sched.timezone) for value in times])
+        jitter_minutes = 0
+    else:
+        trigger = IntervalTrigger(minutes=interval_minutes)
 
     def wrapped():
         try:
@@ -36,7 +46,7 @@ def run_scheduler(job, interval_minutes: int, run_on_start: bool = True,
 
     sched.add_job(
         wrapped,
-        trigger=IntervalTrigger(minutes=interval_minutes),
+        trigger=trigger,
         id="price_monitor",
         max_instances=1,
         coalesce=True,

@@ -1,5 +1,31 @@
 # 同程国际往返独立验收
 
+## 携程和同程联合监控
+
+在 `config.monitor.yaml` 的 `comparison.platforms` 维护平台清单。目前清单包含携程
+（`ctrip`）和同程（`tongcheng`）。新增平台须先具备往返报价及详情采集能力。
+以后修改清单即可，单次和定时命令保持一致。
+
+```powershell
+# 单次联合验收，输出 JSON
+python scripts/compare_round_trip.py
+# 启动本地定时监控，使用配置里的北京时间
+python main.py -c config.monitor.yaml --compare
+```
+
+本地定时进程启动时查一轮，然后在 00:25、08:25、13:25、19:25 运行。
+进程需要保持运行，查询使用本机已登录的浏览器档案。携程和同程的浏览器可在
+`comparison.crawler` 下分别通过 `pc_browser_channel`、`tongcheng_pc_browser_channel` 设置。
+单次验收可用 `--platforms` 临时覆盖。定时模式每轮生成一份合并榜单，显示平台状态、去返航司、
+两程托运、当前已核实前五及并列报价。应用原有通知配置，启用 Server 酱时每轮推送一份榜单，
+有核实的预算内方案时标在标题。
+
+GitHub Actions 仍按正式的 `platforms` 清单执行。切换云端前，需要先验证同程的云端
+浏览器会话、两程托运详情和单轮运行时限。云端验收通过后，再把工作流的执行命令切换到
+联合模式，避免本地定时与云端任务重复推送。
+
+## 同程单平台验收
+
 第一阶段只验证上海↔大阪，同正式配置的去返日期。采集读取同程电脑版往返页面正常加载的同一组合含税总价，
 只接受去返日期均一致且有两段航班号及明确总价的记录，最多输出三项。
 当前同程报价的舱位、详情页实付价和两程托运仍待核实。验收不会开启定时或推送，也不参与达标排名。
@@ -37,10 +63,12 @@ python scripts/verify_tongcheng_round_trip.py --browser-channel msedge
 
 `python scripts/verify_tongcheng_round_trip.py --browser-channel msedge --details`
 
-详情模式默认关闭，只在明确授权后使用。它在原版查询的同一浏览器上下文内选中一个
-已验证日期的去返航班组合，展开经济舱报价，不点击“预订”。只采纳明确含税且没有
-礼包、保险、返现、服务费或营销条款歧义的报价；对同一报价分别点击“上海 - 大阪”
-和“大阪 - 上海”，要求方向标签处于激活状态，再读取成人托运行李，排除手提与儿童规则。
+详情模式默认关闭。它选中与列表报价相符的去返航班并展开经济舱报价。脚本先读取
+每张报价卡上的托运文字，例如「免费托运行李额20KG」和「托运行李2×23KG」。
+报价卡以「去」「返」分组时，按分组直接记录两程的额度，两程齐全即可完成核实。
+卡片未注明方向时，将额度保存在 `baggage_offer.fare_rule`，再打开对应行李提示，
+按当前激活的去返标签读取成人托运。只有明确对应去程、回程或两程各自的额度才计入比价。
+如果只能读到票面说明或一程额度，返回当次报价及已读信息，保留两程待核实状态。
 
 结果复用 `RoundTripQuote.baggage_offer` 和 `core.baggage.baggage_total`，
 输出 `checked_baggage_total`，与现有比价口径兼容。`selected_fare_verified` 表示

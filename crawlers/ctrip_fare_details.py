@@ -255,6 +255,8 @@ def read_details(page, fallback, check_access, diagnostics):
                 if len(legs) != 2:
                     record_failure("parse_error", "fare_baggage_rules_incomplete")
                 offer = {"itinerary_confirmed": True, "tax_inclusive_ticket_confirmed": True, **legs}
+                if fare_text.strip().startswith("经济舱"):
+                    offer["cabin"] = "economy"
                 if inline:
                     offer["fare_rule"] = inline[0]
                 quote = replace(original, price=price, return_flight_no=inbound,

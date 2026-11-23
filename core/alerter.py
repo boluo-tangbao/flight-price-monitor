@@ -7,6 +7,13 @@ from .baggage import baggage_total, checked_baggage_labels, lowest_round_trip_op
 from .models import FlightPrice, Route
 
 
+PLATFORM_NAMES = {"ctrip": "携程", "tongcheng": "同程", "fliggy": "飞猪",
+                  "qunar": "去哪儿", "tuniu": "途牛"}
+COLLECTION_STATUS = {"ok": "已返回报价", "empty": "明确无票", "timeout": "采集超时",
+                     "login_required": "需登录", "blocked": "查询受阻",
+                     "parse_error": "详情未核实", "unsupported": "暂不支持"}
+
+
 def _checked_baggage_line(quote):
     labels = checked_baggage_labels(quote)
     line = f"去程托运 {labels['outbound']}；回程托运 {labels['inbound']}"
@@ -17,6 +24,63 @@ def _checked_baggage_line(quote):
 
 
 class Alerter:
+    def report_joint_round_trip(self, route, report):
+        itinerary = report["itinerary"]
+        ranked = report["ranked_verified"]
+        best = ranked[0] if ranked else None
+        title = f"{route.from_name}↔{route.to_name} 联合比价"
+        if best and best["within_budget"]:
+            title += f" · 预算内 ¥{best['total_with_baggage_cny']:,.0f}"
+        else:
+            title += " · 本轮未确认预算内方案"
+
+        lines = [
+            f"去程 {itinerary['depart']} / 回程 {itinerary['return']}，预算 ¥{itinerary['budget_cny']:,.0f}。",
+            "", "**当前已核实方案 · 按含两程托运总价排序**",
+        ]
+        if not ranked:
+            lines.append("本轮暂无两程托运均已核实的报价。")
+        cutoff = ranked[min(len(ranked), 5) - 1]["total_with_baggage_cny"] if ranked else None
+        previous_total = None
+        for index, row in enumerate(ranked, 1):
+            total = row["total_with_baggage_cny"]
+            if total > cutoff:
+                break
+            if total != previous_total:
+                rank = index
+            previous_total = total
+            platform = PLATFORM_NAMES.get(row["platform"], row["platform"])
+            outbound = f"{row['outbound_airline'] or '航司待确认'} {row['flight_no']}"
+            inbound = f"{row['return_airline'] or '航司待确认'} {row['return_flight_no']}"
+            legs = row["checked_baggage"]
+            view = f" · [查看报价]({row['source_url']})" if row["source_url"] else ""
+            lines.append(f"- 第 {rank} 名 · {platform} · {outbound} / {inbound} · ¥{total:,.2f}"
+                         f" · 去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}{view}")
+
+        pending = [row for row in report["pending_baggage"]
+                   if len(ranked) < 5 or row["ticket_price_cny"] <= cutoff]
+        if pending:
+            lowest = pending[0]
+            platform = PLATFORM_NAMES.get(lowest["platform"], lowest["platform"])
+            lines.extend(["", f"另有 {len(pending)} 条票价可能影响榜单，尚待核实。"
+                           f"最低已读票价为 {platform} ¥{lowest['ticket_price_cny']:,.2f}。"])
+            for row in [item for item in pending if item["fare_baggage_rule"]][:3]:
+                platform = PLATFORM_NAMES.get(row["platform"], row["platform"])
+                legs = row["checked_baggage"]
+                lines.append(f"- {platform} · {row['flight_no']} / {row['return_flight_no']}"
+                             f" · ¥{row['ticket_price_cny']:,.2f} · 票面标注 {row['fare_baggage_rule']}"
+                             f" · 去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}")
+        lines.extend(["", "**各平台采集情况**"])
+        for name, status in report["platforms"].items():
+            label = PLATFORM_NAMES.get(name, name)
+            outcome = COLLECTION_STATUS.get(status["status"], status["status"])
+            lines.append(f"- {label} · {outcome}，已核实 {status['verified_quotes']} 条，"
+                         f"待核实 {status['pending_quotes']} 条。")
+        description = "\n".join(lines)
+        self.logger.info("[联合比价] %s\n%s", title, description)
+        if self.notifier:
+            self.notifier.send(title, description)
+
     def report_round_trip_options(self, route, depart, ret, result):
         ranked = lowest_round_trip_options(result.prices)
         if not ranked:

@@ -10,6 +10,13 @@ routes:
     alert_threshold: 2800
     checked_baggage_required: true
 platforms: [ctrip]
+comparison:
+  # Shared by scripts/compare_round_trip.py and main.py --compare.
+  platforms: [ctrip, tongcheng]
+  times: ["00:25", "08:25", "13:25", "19:25"]
+  crawler:
+    headless: false
+    tongcheng_pc_browser_channel: msedge
 crawler:
   round_trip_fare_details: true
   headless: true
