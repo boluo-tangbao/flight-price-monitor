@@ -17,6 +17,7 @@ from main import build_routes, load_config
 def run_comparison(route, crawler_config, providers, logger):
     depart, back = route.dates[0], route.return_dates[0]
     results = {}
+    tongcheng_diagnostics = None
     for provider in providers:
         crawler_class = REGISTRY[provider]
         if not callable(getattr(crawler_class, "fetch_round_trip", None)):
@@ -24,7 +25,12 @@ def run_comparison(route, crawler_config, providers, logger):
             continue
         crawler = crawler_class(dict(crawler_config), logger)
         results[provider] = collect(crawler, route.from_code, route.to_code, depart, back)
-    return compare_round_trips(route, depart, back, results)
+        if provider == "tongcheng":
+            tongcheng_diagnostics = getattr(crawler, "round_trip_diagnostics", None)
+    report = compare_round_trips(route, depart, back, results)
+    if isinstance(tongcheng_diagnostics, dict):
+        report["platforms"]["tongcheng"]["diagnostics"] = tongcheng_diagnostics
+    return report
 
 
 def main():
@@ -34,6 +40,8 @@ def main():
                         help="Override comparison.platforms for just this run")
     parser.add_argument("--ctrip-channel", choices=["chromium", "chrome", "msedge"])
     parser.add_argument("--tongcheng-channel", choices=["chrome", "msedge"])
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Show unverified list prices and detailed fare collection records")
     args = parser.parse_args()
     cfg = load_config(args.config)
     routes = build_routes(cfg)
@@ -52,6 +60,11 @@ def main():
     logging.basicConfig(level=logging.CRITICAL)
     report = run_comparison(routes[0], config, providers,
                             logging.getLogger("round_trip_comparison"))
+    if not args.diagnostics:
+        report.pop("pending_baggage", None)
+        report.pop("pending_at_or_below_best_total", None)
+        for status in report.get("platforms", {}).values():
+            status.pop("diagnostics", None)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["best_verified"] else 2
 

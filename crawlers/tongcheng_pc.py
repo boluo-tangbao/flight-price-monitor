@@ -54,7 +54,7 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
         with super().browser(*args, **kwargs) as ctx:
             yield ctx
             reader = getattr(self, 'detail_reader', None)
-            if reader is not None and self.last_outcome == 'ok':
+            if reader is not None and self.last_outcome in ('ok', 'error') and self._last_page is not None:
                 self.detail_quotes = reader(self._last_page)
 
     def _watch_retry_after(self, page):

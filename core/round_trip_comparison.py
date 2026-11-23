@@ -2,7 +2,7 @@
 import math
 
 from .airlines import round_trip_airlines
-from .baggage import baggage_total, checked_baggage_labels
+from .baggage import baggage_total, checked_baggage_labels, requires_baggage_purchase
 from .models import RoundTripQuote
 
 
@@ -33,10 +33,11 @@ def compare_round_trips(route, depart, back, results):
 
     Each provider is queried for one adult in economy. An adapter must only
     mark a fare verified after confirming that scope and both baggage legs.
+    Only fares with checked baggage included in the ticket price are ranked.
     """
     ranked, pending, platforms = [], [], {}
     for platform, result in results.items():
-        verified_count = pending_count = rejected_count = 0
+        verified_count = pending_count = rejected_count = purchase_required_count = 0
         for quote in result.prices:
             if (not isinstance(quote, RoundTripQuote) or quote.platform != platform
                     or (quote.from_city, quote.to_city, quote.depart_date, quote.return_date)
@@ -48,6 +49,9 @@ def compare_round_trips(route, depart, back, results):
             cabin = offer.get("cabin")
             if cabin and cabin != "economy":
                 rejected_count += 1
+                continue
+            if requires_baggage_purchase(quote):
+                purchase_required_count += 1
                 continue
             total = (baggage_total(quote)
                      if cabin == "economy" and quote.flight_no and quote.return_flight_no else None)
@@ -70,7 +74,8 @@ def compare_round_trips(route, depart, back, results):
                 verified_count += 1
         platforms[platform] = {"status": result.status, "evidence": result.evidence,
                                "verified_quotes": verified_count, "pending_quotes": pending_count,
-                               "rejected_quotes": rejected_count}
+                               "rejected_quotes": rejected_count,
+                               "excluded_baggage_purchase_required": purchase_required_count}
 
     ranked.sort(key=lambda row: (row["total_with_baggage_cny"], row["platform"],
                                  row["flight_no"], row["return_flight_no"]))
@@ -84,7 +89,8 @@ def compare_round_trips(route, depart, back, results):
     return {
         "itinerary": {"origin": route.from_code, "destination": route.to_code,
                       "depart": depart, "return": back, "adults": 1, "cabin": "economy",
-                      "budget_cny": route.alert_threshold, "checked_baggage": "both_directions"},
+                      "budget_cny": route.alert_threshold, "checked_baggage": "both_directions",
+                      "checked_baggage_included_in_fare": True},
         "platforms": platforms,
         "best_verified": best,
         "ranked_verified": ranked,

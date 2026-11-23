@@ -5,17 +5,19 @@ import json
 import re
 import time
 import unicodedata
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from playwright.sync_api import TimeoutError as BrowserTimeout
-from core.baggage import baggage_total
+from core.baggage import baggage_total, checked_baggage_labels
 from core.collection import FetchFailure
+from core.models import RoundTripQuote
 
 
-CHECKED_LABEL = r"(?:免费\s*)?托运(?:\s*行李)?(?:\s*(?:额度|额))?"
+CHECKED_LABEL = r"(?:每人\s*可\s*)?(?:免费\s*)?托运(?:\s*行李)?(?:\s*(?:额度|额))?"
 FARE_BAGGAGE_TEXT = re.compile(r"行李\s*额|托运")
-FARE_CHECKED_LABEL = re.compile(rf"(?:无免费|不含(?:免费)?)(?:托运|行李额)|{CHECKED_LABEL}")
-NO_FREE = re.compile(r"^(?:无免费|不含(?:免费)?)(?:托运(?:行李(?:额)?)?|行李额)")
+FARE_CHECKED_LABEL = re.compile(rf"(?:无(?:免费)?|不含(?:免费)?)(?:托运|行李额)|{CHECKED_LABEL}")
+NO_FREE = re.compile(r"^(?:(?:无(?:免费)?|不含(?:免费)?)托运(?:行李(?:额)?)?|"
+                     r"(?:无免费|不含免费)行李额)")
 WEIGHT = r"(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)"
 PIECES_AND_WEIGHT = re.compile(rf"(\d+)\s*(?:件\s*)?[x×*]\s*{WEIGHT}", re.I)
 DIRECTIONS = {
@@ -28,6 +30,7 @@ LEG_PREFIX = re.compile(
     r"^(去程|回程|返程|[去返](?=$|[\s:：]|退改|提供|免费|无免费|不含|托运|行李额))\s*[:：]?\s*")
 POPUP = '[role="tooltip"]:visible, .v-popover_box:visible, [role="dialog"]:visible'
 CHECKED_HEADING = re.compile(rf"^{CHECKED_LABEL}\s*[:：]?$")
+BAGGAGE_CONTROL_ELEMENTS = 'a, button, [role="link"], [role="button"], .v-popover__reference'
 BAGGAGE_CONTROLS = (
     'a:visible, button:visible, [role="link"]:visible, [role="button"]:visible, '
     '.v-popover__reference:visible:not(:has(a, button, [role="link"], [role="button"]))'
@@ -46,15 +49,26 @@ def flight_pattern(number):
 
 def fare_price(text):
     """Only a single explicit tax-inclusive economy fare without add-on ambiguity."""
-    if '经济舱' not in text or '含税总价' not in text:
-        return None
+    return _fare_price_and_reason(text)[0]
+
+
+def _fare_price_and_reason(text):
+    if not re.search(r'(?<!高端)(?<!超级)经济舱', text):
+        return None, "no_economy_marker"
+    if '含税总价' not in text:
+        return None, "no_tax_total_marker"
     if re.search(r'礼包|套餐|组合险|损失险|低价优品|另付|服务费|优惠券|返现', text):
-        return None
-    prices = re.findall(r'^¥\s*([\d,]+(?:\.\d{1,2})?)\s*$', text, re.M)
-    if len(prices) != 1:
-        return None
-    value = float(prices[0].replace(',', ''))
-    return value if 100 <= value <= 200000 else None
+        return None, "add_on_or_discount"
+    price = _displayed_fare_price(text)
+    if price is None:
+        return None, "price_line_not_unique"
+    return (price, None) if 100 <= price <= 200000 else (None, "price_out_of_range")
+
+
+def _displayed_fare_price(text):
+    text = unicodedata.normalize("NFKC", text)
+    prices = re.findall(r'^¥[ \t]*(?:\n[ \t]*)?(\d[\d,]*(?:\.\d{1,2})?)[ \t]*$', text, re.M)
+    return float(prices[0].replace(',', '')) if len(prices) == 1 else None
 
 
 def checked_allowance(text):
@@ -117,7 +131,9 @@ def fare_checked_baggage(text):
     """Read the fare card in order, keeping each rule under its 去/返 badge."""
     notes, legs, ambiguous = set(), {}, set()
     current_leg = None
-    for line in re.split(r"[\n；;|]", unicodedata.normalize("NFKC", text)):
+    # Refund terms can be rendered beside the allowance as an adjacent span.
+    for line in re.split(r"[\n;|]|\s+(?=(?:部分行程)?(?:退票|退改|改期|不得退改))",
+                         unicodedata.normalize("NFKC", text)):
         line = line.strip()
         both = EACH_LEG.match(line)
         direction = LEG_PREFIX.match(line)
@@ -270,6 +286,7 @@ def _linked_baggage_rules(page, link, direction, wait, diagnostics, check_access
     if (target.scheme != "https" or not (host == "ly.com" or host.endswith(".ly.com"))
             or target.username is not None or target.password is not None):
         return {}
+    diagnostics["detail_baggage_linked_pages"] = diagnostics.get("detail_baggage_linked_pages", 0) + 1
     detail = page.context.new_page()
     try:
         response = detail.goto(url, wait_until="domcontentloaded", timeout=ACTION_MS)
@@ -286,44 +303,31 @@ def _linked_baggage_rules(page, link, direction, wait, diagnostics, check_access
         detail.close()
 
 
-def _open_baggage_rules(page, link, popup, wait, diagnostics, check_access):
-    if BAGGAGE_PURCHASE.search(link.inner_text(timeout=ACTION_MS)):
-        return {}
-    page.mouse.move(0, 0)
-    wait(lambda: popup.count() == 0, 1)
+def _read_baggage_surface(page, popup, direction, wait, diagnostics, activate, seconds):
     prior = Counter(_visible_checked_tables(page))
-    old_popup = popup.count()
-    direction = _link_direction(link)
+    prior_popups = set(popup.all_inner_texts())
 
     def new_tables():
         return list((Counter(_visible_checked_tables(page)) - prior).elements())
 
-    def opened():
-        return bool(new_tables() or (old_popup == 0 and popup.count() == 1))
+    def changed_popup():
+        texts = popup.all_inner_texts()
+        return len(texts) == 1 and texts[0] not in prior_popups
 
-    link.hover(timeout=ACTION_MS)
-    if not wait(opened, 2):
-        # Only activate an in-page baggage control. Its description may be a
-        # nested child of a hash link, an actual button or the popup reference.
-        control = link.and_(page.locator(
-            'a:not([href]), a[href^="#"], a[href="javascript:void(0)"], a[href="javascript:void(0);"], '
-            'a[href="javascript:;"], button, '
-            '[role="button"], .v-popover__reference'))
-        if control.count() != 1:
-            return _linked_baggage_rules(page, link, direction, wait, diagnostics, check_access)
-        control.click(timeout=ACTION_MS)
-        if not wait(opened, 3):
-            return {}
+    activate(timeout=ACTION_MS)
+    if not wait(lambda: new_tables() or changed_popup(), seconds):
+        return {}
 
     tables = new_tables()
-    if not tables and old_popup == 0 and popup.count() == 1:
+    diagnostics["detail_baggage_surfaces"] = diagnostics.get("detail_baggage_surfaces", 0) + 1
+    if not tables and changed_popup():
         # Some dialogs insert their table after the title becomes visible.
         wait(lambda: new_tables() or (popup.count() == 1 and
              adult_checked_rule(popup.inner_text(timeout=ACTION_MS))), 2)
         tables = new_tables()
     diagnostics["detail_baggage_tables"] = diagnostics.get("detail_baggage_tables", 0) + len(tables)
     legs = _rules_from_tables(tables, direction)
-    if len(legs) == 2 or old_popup or popup.count() != 1:
+    if len(legs) == 2 or not changed_popup():
         return legs
 
     # An explicit all-directions or per-direction statement is usable even
@@ -334,8 +338,12 @@ def _open_baggage_rules(page, link, popup, wait, diagnostics, check_access):
     if adult:
         legs.update(fare_checked_baggage(adult[1])[1])
     tabs = popup.locator('.crumb-item:visible, [role="tab"]:visible')
+    if direction and not tabs.count() and (rule := adult_checked_rule(panel_text)):
+        legs.setdefault(direction, {"source": "panel", **rule})
     active = popup.locator('.crumb-item.active:visible, [role="tab"][aria-selected="true"]:visible')
     for key, pattern in DIRECTIONS.items():
+        if key in legs:
+            continue
         diagnostics["detail_stage"] = key + "_baggage"
         tab = tabs.filter(has_text=pattern)
         if tab.count() != 1:
@@ -358,18 +366,68 @@ def _open_baggage_rules(page, link, popup, wait, diagnostics, check_access):
     return legs
 
 
-def _panel_baggage(page, fare, wait, diagnostics, check_access):
-    popup = page.locator(POPUP).filter(has_text=re.compile(r"行李(?:规定|规则)|托运"))
-    controls = _baggage_controls(fare)
-    if not controls.count():
-        controls = fare.get_by_text(BAGGAGE_LINK).and_(page.locator(":visible"))
-    legs = {}
-    for link in controls.all()[:2]:
+def _open_baggage_rules(page, link, popup, wait, diagnostics, check_access, known_legs, deadline):
+    if BAGGAGE_PURCHASE.search(link.inner_text(timeout=ACTION_MS)):
+        return {}
+    direction = _link_direction(link)
+    page.mouse.move(0, 0)
+    wait(lambda: popup.count() == 0, 1)
+
+    def try_surface(action, seconds, counter):
+        if time.monotonic() >= deadline:
+            return {}
+        diagnostics[counter] = diagnostics.get(counter, 0) + 1
         try:
-            legs.update(_open_baggage_rules(page, link, popup, wait, diagnostics, check_access))
+            return _read_baggage_surface(page, popup, direction, wait, diagnostics, action, seconds)
         except BrowserTimeout:
             diagnostics["detail_baggage_timeout"] = True
-        if len(legs) == 2:
+            return {}
+
+    legs = try_surface(link.hover, 2, "detail_baggage_hovers")
+    if DIRECTIONS.keys() <= known_legs | legs.keys():
+        return legs
+
+    # Only activate a rule control on the current page. Regular links are
+    # validated separately before opening a read-only rules page.
+    control = link.and_(page.locator(
+        'a:not([href]), a[href^="#"], a[href="javascript:void(0)"], a[href="javascript:void(0);"], '
+        'a[href="javascript:;"], button, [role="button"], .v-popover__reference'))
+    if control.count() == 1:
+        legs.update(try_surface(control.click, 3, "detail_baggage_clicks"))
+    if not DIRECTIONS.keys() <= known_legs | legs.keys() and time.monotonic() < deadline:
+        try:
+            legs.update(_linked_baggage_rules(page, link, direction, wait, diagnostics, check_access))
+        except BrowserTimeout:
+            diagnostics["detail_baggage_timeout"] = True
+    return legs
+
+
+def _panel_baggage(page, fare, wait, diagnostics, check_access, known_legs=(), deadline=float("inf")):
+    popup = page.locator(POPUP).filter(has_text=re.compile(r"行李(?:规定|规则)|托运"))
+    controls = _baggage_controls(fare)
+    text_controls = fare.get_by_text(BAGGAGE_LINK).and_(page.locator(
+        f':visible:not(:is({BAGGAGE_CONTROL_ELEMENTS}), :is({BAGGAGE_CONTROL_ELEMENTS}) *)'
+    )).filter(has_not_text=BAGGAGE_PURCHASE)
+    candidates = controls.all() + text_controls.all()
+    diagnostics["detail_baggage_controls"] = diagnostics.get("detail_baggage_controls", 0) + len(candidates)
+    legs = _rules_from_tables(_visible_checked_tables(fare))
+    known_legs = set(known_legs)
+    for link in candidates:
+        if time.monotonic() >= deadline:
+            break
+        diagnostics["detail_baggage_controls_tried"] = diagnostics.get("detail_baggage_controls_tried", 0) + 1
+        try:
+            shape = link.evaluate("""element => ({
+                kind: ['A', 'BUTTON', 'SPAN', 'DIV'].includes(element.tagName) ? element.tagName : 'other',
+                has_href: element.hasAttribute('href'),
+                has_controls: element.hasAttribute('aria-controls'),
+            })""", timeout=ACTION_MS)
+            diagnostics.setdefault("detail_baggage_control_shapes", []).append(shape)
+            legs.update(_open_baggage_rules(
+                page, link, popup, wait, diagnostics, check_access, known_legs | legs.keys(), deadline))
+        except BrowserTimeout:
+            diagnostics["detail_baggage_timeout"] = True
+        if DIRECTIONS.keys() <= known_legs | legs.keys():
             break
     return legs
 
@@ -387,11 +445,392 @@ def select_pair(fallback, preferred_pair=None):
     return min(fallback, key=lambda q: q.price)
 
 
-def read_details(page, fallback, check_access, diagnostics, preferred_pair=None):
-    """Select one observed flight pair, inspect at most three plain economy fares."""
+CABIN_NAME = re.compile(r'高端经济舱|超级经济舱|经济舱|商务舱|公务舱|头等舱|尊享飞')
+
+
+def _inspect_fare_rows(page, fares, original, check, wait, check_access, diagnostics, deadline,
+                       inventory=None, fare_group=None):
+    candidates = []
+    rejections = Counter()
+    for fare in fares.all():
+        text = fare.inner_text(timeout=ACTION_MS)
+        price, reason = _fare_price_and_reason(text)
+        if fare_group and not fare_group.startswith('经济舱'):
+            price, reason = None, 'non_standard_fare_tab'
+        note, legs = fare_checked_baggage(text)
+        row = None
+        if inventory is not None:
+            cabin = CABIN_NAME.search(text)
+            row = {
+                'flight_no': original.flight_no,
+                'return_flight_no': original.return_flight_no,
+                'cabin': cabin[0] if cabin else None,
+                'fare_group': fare_group,
+                'display_price_cny': _displayed_fare_price(text),
+                'tax_total_label': '含税总价' in text,
+                'price_review': reason,
+                'fare_baggage_rule': note or None,
+            }
+            inventory.append(row)
+        if price is None:
+            rejections[reason] += 1
+        else:
+            candidates.append((price, fare, text, note, legs, row))
+
+    diagnostics['detail_fares_seen'] = diagnostics.get('detail_fares_seen', 0) + fares.count()
+    diagnostics['detail_plain_fares'] = diagnostics.get('detail_plain_fares', 0) + len(candidates)
+    rejections.update(diagnostics.get('detail_fare_rejections', {}))
+    diagnostics['detail_fare_rejections'] = dict(rejections)
+
+    detailed = []
+    best_total = None
+    for price, fare, text, note, legs, row in sorted(candidates, key=lambda candidate: candidate[0]):
+        timed_out = time.monotonic() >= deadline
+        if inventory is None and (timed_out or (best_total is not None and price > best_total)):
+            break
+        if not timed_out:
+            check()
+            diagnostics['detail_stage'] = 'baggage_popup'
+            try:
+                legs.update(_panel_baggage(page, fare, wait, diagnostics, check_access,
+                                           known_legs=legs, deadline=deadline))
+            except BrowserTimeout:
+                diagnostics['detail_baggage_timeout'] = True
+        offer = {'itinerary_confirmed': True, 'tax_inclusive_ticket_confirmed': True,
+                 'cabin': 'economy', **legs}
+        if note:
+            offer['fare_rule'] = note
+        quote = replace(original, price=price, price_basis='selected_round_trip_tax',
+            baggage_offer=offer,
+            extra=json.dumps({'cabin': '经济舱', 'cabin_verified': True,
+                'selected_fare_verified': True, 'final_fare_verified': False,
+                'baggage_offer': offer,
+                'refund_rule': '不得退改' if '不得退改' in text else '以页面规则为准'}, ensure_ascii=False))
+        detailed.append(quote)
+        total = baggage_total(quote)
+        if row is not None:
+            row['checked_baggage'] = checked_baggage_labels(quote)
+            row['total_with_baggage_cny'] = total
+        if total is not None and (best_total is None or total < best_total):
+            best_total = total
+    return detailed
+
+
+DISPLAY_FLIGHT = re.compile(r'(?<![A-Z0-9])((?:[A-Z][A-Z0-9]|[0-9][A-Z]))(\d{1,4})(?![A-Z0-9])')
+AIRCRAFT_PREFIX = re.compile(r'(?:空客|波音|空中客车|中国商飞|商飞|Airbus|Boeing)\s*$', re.I)
+RETURN_HEADING = re.compile(r'^选择\s*(?:返程|回程)')
+OPEN_RETURN_FARES = re.compile(r'^(?:选择(?:返程|回程)?|展开(?:报价)?|查看(?:报价|票价|价格))\s*[⌄∨﹀]?$')
+RESELECT_OUTBOUND = re.compile(r'^(?:(?:返回|重新)选择|重选|更换|修改)去程$')
+CABIN_TAB = re.compile(rf'^({CABIN_NAME.pattern})\s*[¥￥]\s*([\d,.]+)\s*起$')
+
+
+def _flight_cards(cards):
+    records = {}
+    duplicates = set()
+    for text in cards.all_inner_texts():
+        numbers = {match[1] + str(int(match[2])) for match in DISPLAY_FLIGHT.finditer(text)
+                   if not AIRCRAFT_PREFIX.search(text[:match.start()])}
+        # A card with multiple sectors requires a model that preserves all of them.
+        if len(numbers) != 1:
+            continue
+        number = numbers.pop()
+        if number in records:
+            duplicates.add(number)
+        prices = re.findall(r'¥\s*(\d[\d,]*(?:\.\d{1,2})?)', unicodedata.normalize('NFKC', text))
+        records[number] = float(prices[0].replace(',', '')) if len(prices) == 1 else float('inf')
+    return {number: price for number, price in records.items() if number not in duplicates}
+
+
+def _card_number(value):
+    match = DISPLAY_FLIGHT.fullmatch(value)
+    return match[1] + str(int(match[2])) if match else value
+
+
+def _same_search(current, original):
+    actual, expected = map(urlsplit, (current, original))
+    return ((actual.scheme, actual.hostname, actual.path) == (expected.scheme, expected.hostname, expected.path)
+            and parse_qs(actual.query).get('para') == parse_qs(expected.query).get('para'))
+
+
+def _visible_fare_container(card, page):
+    # Locate the nearest fare panel belonging to this flight header. A parent
+    # with other flight headers might contain an entirely different offer.
+    header = 'contains(concat(" ", normalize-space(@class), " "), " flight-item-main ")'
+    offer = 'contains(concat(" ", normalize-space(@class), " "), " pro-item-box ")'
+    return card.locator(f'xpath=ancestor::*[count(.//*[{header}])=1 and .//*[{offer}]][1]').filter(
+        has=page.locator('.pro-item-box:visible'))
+
+
+def _current_fare_tab(labels, rows):
+    # Some sites display their selected tab as an ordinary element. The
+    # already-open cabin and its minimum fare can identify that tab.
+    cabins = {match[0] if (match := CABIN_NAME.search(text)) else None for text in rows}
+    if len(cabins) != 1 or None in cabins:
+        return None
+    lowest = min((price for text in rows if (price := _displayed_fare_price(text)) is not None),
+                 default=None)
+    candidates = [label for label in labels if (tab := CABIN_TAB.fullmatch(' '.join(label.split())))
+                  and tab[1] in cabins and _displayed_fare_price('¥' + tab[2]) == lowest]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
+                        preferred_pair=None, current_quotes=None, pair_limit=8):
+    """Inspect the available fare cards in one round-trip search document."""
+    origin, destination, depart, back, source_url = itinerary
+    deadline = time.monotonic() + 150
+    diagnostics['detail_probe_version'] = 2
+    diagnostics['detail_stage'] = 'outbound_card'
+    diagnostics['detail_pair_limit'] = 1 if preferred_pair else pair_limit
+    attempted = diagnostics['detail_pairs_attempted'] = []
+    scanned = diagnostics['detail_pairs_scanned'] = []
+    inventory = diagnostics['detail_fare_inventory'] = []
+    transitions = diagnostics['detail_return_transitions'] = []
+    detailed = []
+    limit = diagnostics['detail_pair_limit']
+
+    def check():
+        check_access(page.url, page.inner_text('body', timeout=ACTION_MS))
+        if not _same_search(page.url, source_url):
+            raise FetchFailure('parse_error', 'tongcheng_detail_search_changed', prices=detailed)
+
+    def wait(read, seconds=8):
+        until = min(deadline, time.monotonic() + seconds)
+        while True:
+            check()
+            if value := read():
+                return value
+            if time.monotonic() >= until:
+                return None
+            page.wait_for_timeout(200)
+
+    visible = page.locator(':visible')
+    flight_cards = page.locator('.flight-item-main:visible')
+    choose = page.get_by_text('选择', exact=True).and_(visible)
+    open_fares = page.get_by_text(OPEN_RETURN_FARES).and_(visible)
+    collapse = page.get_by_text(re.compile(r'^收起\s*[⌃∧︿]?$')).and_(visible)
+    reselect = page.get_by_text(RESELECT_OUTBOUND).and_(visible)
+    selectable_out = flight_cards.filter(has=choose)
+    return_heading = page.get_by_text(RETURN_HEADING).and_(page.locator(
+        ':visible:not(:is(a, button, [role="button"]), :is(a, button, [role="button"]) *)'))
+    requested_outbound = _card_number(preferred_pair[0]) if preferred_pair else None
+    if requested_outbound:
+        diagnostics['detail_requested_outbound'] = requested_outbound
+
+    def outbound_ready():
+        if return_heading.count():
+            return None
+        cards = _flight_cards(selectable_out)
+        if requested_outbound and requested_outbound not in cards:
+            return None
+        return cards
+
+    outbound_records = wait(outbound_ready)
+    if not outbound_records:
+        raise FetchFailure('parse_error', 'tongcheng_outbound_card_not_matched', prices=fallback)
+    diagnostics['detail_visible_outbound_cards'] = len(outbound_records)
+
+    def listed_pairs():
+        listed = {}
+        live = current_quotes() if current_quotes else ()
+        for row in (*fallback, *live):
+            key = (_card_number(row.flight_no), _card_number(row.return_flight_no))
+            if key not in listed or row.price < listed[key].price:
+                listed[key] = row
+        return listed
+
+    listed = listed_pairs()
+    ranked = sorted(listed, key=lambda pair: (listed[pair].price, pair))
+    diagnostics['detail_initial_list_leaders'] = [
+        {'flight_no': pair[0], 'return_flight_no': pair[1], 'price_cny': listed[pair].price,
+         'outbound_card_matched': pair[0] in outbound_records}
+        for pair in ranked[:limit]
+    ]
+    targets = {}
+    if preferred_pair:
+        outward, inward = map(_card_number, preferred_pair)
+        targets[outward] = [inward]
+        diagnostics['detail_selection_basis'] = 'requested_pair'
+    else:
+        visible_ranked = [pair for pair in ranked if pair[0] in outbound_records]
+        for outward, inward in visible_ranked[:limit]:
+            targets.setdefault(outward, []).append(inward)
+        diagnostics['detail_selection_basis'] = 'listed_price' if targets else 'visible_flight_cards'
+        for outward in sorted(outbound_records, key=outbound_records.__getitem__):
+            targets.setdefault(outward, [])
+    diagnostics['detail_planned_pairs'] = [[outward, inward] for outward, group in targets.items()
+                                           for inward in group]
+
+    on_return_page = False
+    for index, (outward, wanted) in enumerate(targets.items()):
+        if len(attempted) >= limit or time.monotonic() >= deadline:
+            break
+        if on_return_page:
+            if reselect.count() != 1:
+                diagnostics['detail_coverage_limit'] = 'outbound_reselect_unavailable'
+                break
+            check()
+            reselect.click(timeout=ACTION_MS)
+            if not wait(lambda: not return_heading.count() and _flight_cards(selectable_out)):
+                diagnostics['detail_coverage_limit'] = 'outbound_list_not_restored'
+                break
+            on_return_page = False
+        outbound = selectable_out.filter(has_text=flight_pattern(outward))
+        if outbound.count() != 1:
+            continue
+        diagnostics['detail_stage'] = 'return_card'
+        diagnostics['detail_selected_outbound'] = outward
+        check()
+        outbound.get_by_text('选择', exact=True).and_(visible).click(timeout=ACTION_MS)
+        transition = {'outbound': outward}
+        transitions.append(transition)
+
+        def visible_returns():
+            cards = _flight_cards(flight_cards)
+            known_returns = set(wanted) | {pair[1] for pair in listed_pairs() if pair[0] == outward}
+            has_heading = bool(return_heading.count())
+            known_visible = known_returns.intersection(cards) - outbound_records.keys()
+            transition.update({
+                'return_heading_visible': has_heading,
+                'visible_flight_cards': flight_cards.count(),
+                'known_return_cards': len(known_visible),
+            })
+            if not (has_heading or known_visible):
+                return None
+            cards = {number: price for number, price in cards.items()
+                     if number != outward and (number not in outbound_records or number in known_returns)}
+            if preferred_pair and wanted[0] not in cards:
+                return None
+            return cards
+
+        available = wait(visible_returns, 15)
+        if available and wanted and not set(wanted).intersection(available):
+            def planned_returns():
+                cards = visible_returns()
+                return cards if cards and set(wanted).intersection(cards) else None
+
+            available = wait(planned_returns, 4) or available
+        can_reselect = reselect.count() == 1
+        transition['reselect_visible'] = can_reselect
+        on_return_page = bool(available or can_reselect or transition.get('return_heading_visible')
+                              or transition.get('known_return_cards'))
+        if not available:
+            transition['status'] = 'return_list_unavailable'
+            diagnostics.setdefault('detail_coverage_limit', 'return_list_unavailable')
+            continue
+        transition['status'] = 'return_list_ready'
+        diagnostics['detail_return_quote_candidates'] = len(available)
+        shown = listed_pairs()
+        priority = [number for number in wanted if number in available]
+        if not preferred_pair:
+            def price_for(number):
+                listed_quote = shown.get((outward, number))
+                return listed_quote.price if listed_quote is not None else available[number]
+
+            others = sorted((number for number in available if number not in priority),
+                            key=price_for)
+            # Keep room for cheaper API-ranked combinations under later outbounds.
+            reserved = sum(len(group) for group in list(targets.values())[index + 1:])
+            if reserved and reselect.count() != 1:
+                diagnostics['detail_coverage_limit'] = 'outbound_reselect_unavailable'
+                reserved = 0
+            priority.extend(others[:max(0, limit - len(attempted) - len(priority) - reserved)])
+
+        for inward in priority:
+            if len(attempted) >= limit or time.monotonic() >= deadline:
+                break
+            check()
+            pair = [outward, inward]
+            attempted.append(pair)
+            inbound = flight_cards.filter(has_text=flight_pattern(inward))
+            if inbound.count() != 1:
+                continue
+            diagnostics['detail_stage'] = 'fare_cards'
+            try:
+                container = _visible_fare_container(inbound, page)
+                if not container.count() and not inbound.filter(has=collapse).count():
+                    action = inbound.get_by_text(OPEN_RETURN_FARES).and_(open_fares)
+                    if action.count() != 1:
+                        diagnostics['detail_return_action_unmatched'] = diagnostics.get(
+                            'detail_return_action_unmatched', 0) + 1
+                        continue
+                    action.click(timeout=ACTION_MS)
+                if not wait(lambda: container.count() == 1):
+                    diagnostics['detail_fare_panel_missing'] = diagnostics.get(
+                        'detail_fare_panel_missing', 0) + 1
+                    continue
+                original = shown.get((outward, inward))
+                if original is None:
+                    original = RoundTripQuote('tongcheng', origin, destination, depart, 0,
+                        flight_no=outward, return_date=back, return_flight_no=inward, source_url=source_url)
+                scanned.append(pair)
+                scan_deadline = min(deadline, time.monotonic() + 12)
+                fares = container.locator('.pro-item-box:visible')
+                tabs = container.get_by_text(CABIN_TAB).and_(page.locator(':visible:not(.pro-item-box *)'))
+                tab_labels = list(dict.fromkeys(tabs.all_inner_texts()))
+                initial_rows = tuple(fares.all_inner_texts())
+                active_labels = tabs.and_(page.locator('[aria-selected="true"]')).all_inner_texts()
+                current_tab = active_labels[0] if len(active_labels) == 1 else _current_fare_tab(
+                    tab_labels, initial_rows)
+                seen = {initial_rows}
+                detailed.extend(_inspect_fare_rows(page, fares, original, check, wait, check_access,
+                                                   diagnostics, scan_deadline, inventory, current_tab))
+                for label in tab_labels:
+                    if time.monotonic() >= deadline:
+                        break
+                    tab = tabs.and_(page.get_by_text(label, exact=True))
+                    if (label == current_tab or tab.count() != 1
+                            or tab.get_attribute('aria-selected', timeout=ACTION_MS) == 'true'):
+                        continue
+                    check()
+                    try:
+                        tab.click(timeout=ACTION_MS)
+                    except BrowserTimeout:
+                        diagnostics['detail_fare_tab_timeouts'] = diagnostics.get('detail_fare_tab_timeouts', 0) + 1
+                        continue
+
+                    def new_tab_rows():
+                        texts = tuple(fares.all_inner_texts())
+                        return texts if texts and texts not in seen else None
+
+                    current = wait(new_tab_rows, 2)
+                    if current:
+                        seen.add(current)
+                        detailed.extend(_inspect_fare_rows(page, fares, original, check, wait, check_access,
+                                                           diagnostics, scan_deadline, inventory, label))
+            except BrowserTimeout:
+                diagnostics['detail_pair_timeouts'] = diagnostics.get('detail_pair_timeouts', 0) + 1
+
+    diagnostics['detail_lowest_display_fares'] = sorted(
+        (row for row in inventory if row['display_price_cny'] is not None),
+        key=lambda row: row['display_price_cny'])[:5]
+    diagnostics['detail_verified_fares'] = sum(baggage_total(quote) is not None for quote in detailed)
+    diagnostics['detail_final_list_leaders'] = [
+        {'flight_no': row.flight_no, 'return_flight_no': row.return_flight_no, 'price_cny': row.price}
+        for row in sorted(listed_pairs().values(), key=lambda row: row.price)[:limit]
+    ]
+    diagnostics['detail_status'] = 'ok' if inventory else 'unverified'
+    if inventory:
+        diagnostics['detail_stage'] = 'inventory_collected'
+    if not inventory:
+        if transitions and all(step['status'] == 'return_list_unavailable' for step in transitions):
+            evidence = 'tongcheng_return_list_unavailable'
+        elif diagnostics.get('detail_return_action_unmatched'):
+            evidence = 'tongcheng_return_fare_control_not_matched'
+        else:
+            evidence = 'tongcheng_no_fare_cards_read'
+        raise FetchFailure('parse_error', evidence, prices=fallback)
+    if not detailed:
+        raise FetchFailure('parse_error', 'tongcheng_fare_inventory_without_verified_economy_price', prices=fallback)
+    return detailed
+
+
+def read_details(page, fallback, check_access, diagnostics, preferred_pair=None, current_quotes=None):
+    """Select one observed pair and look for its cheapest verified baggage total."""
     if not fallback:
         raise FetchFailure('parse_error', 'tongcheng_no_pair_for_details')
     deadline = time.monotonic() + 90
+    diagnostics['detail_probe_version'] = 1
     diagnostics['detail_stage'] = 'outbound_card'
 
     def check():
@@ -408,83 +847,92 @@ def read_details(page, fallback, check_access, diagnostics, preferred_pair=None)
                 return None
             page.wait_for_timeout(250)
 
-    def card(number):
-        pattern = flight_pattern(number)
-        choice = page.get_by_text('选择', exact=True).and_(page.locator(':visible'))
-        candidates = page.locator('.flight-item-main:visible').filter(has=choice).filter(has_text=pattern)
-        matches = [candidate for candidate in candidates.all()
-                   if pattern.search(candidate.inner_text(timeout=ACTION_MS))]
-        return matches[0] if len(matches) == 1 else None
+    visible_cards = page.locator('.flight-item-main:visible')
+    visible = page.locator(':visible')
+    selectable_cards = visible_cards.filter(has=page.get_by_text('选择', exact=True).and_(visible))
+    expanded_cards = visible_cards.filter(has=page.get_by_text(re.compile(r'^收起\s*[⌃∧︿]?$')).and_(visible))
 
-    def visible_pair(options, attribute):
+    def visible_pair(options, attribute, cards):
+        texts = cards.all_inner_texts()
         for quote in options:
-            if candidate := card(getattr(quote, attribute)):
+            pattern = flight_pattern(getattr(quote, attribute))
+            if sum(bool(pattern.search(text)) for text in texts) != 1:
+                continue
+            candidate = cards.filter(has_text=pattern)
+            if candidate.count() == 1:
                 return quote, candidate
         return None
 
     check()
-    options = [select_pair(fallback, preferred_pair)] if preferred_pair else sorted(fallback, key=lambda q: q.price)[:8]
-    selection = wait(lambda: visible_pair(options, 'flight_no'))
+    options = [select_pair(fallback, preferred_pair)] if preferred_pair else sorted(fallback, key=lambda q: q.price)
+    selection = wait(lambda: visible_pair(options, 'flight_no', selectable_cards))
     if selection is None:
+        diagnostics['detail_visible_flight_cards'] = visible_cards.count()
+        diagnostics['detail_selectable_flight_cards'] = selectable_cards.count()
         raise FetchFailure('parse_error', 'tongcheng_outbound_card_not_matched', prices=fallback)
     selected, outbound = selection
-    visible = page.locator(':visible')
+    diagnostics['detail_selected_outbound'] = selected.flight_no
     outbound.get_by_text('选择', exact=True).and_(visible).click(timeout=ACTION_MS)
     diagnostics['detail_stage'] = 'return_card'
-    same_outbound = [quote for quote in options if flight_pattern(selected.flight_no).fullmatch(quote.flight_no)]
-    selection = wait(lambda: visible_pair(same_outbound, 'return_flight_no'))
+    outbound_pattern = flight_pattern(selected.flight_no)
+
+    def choose_return():
+        # The outbound click may update the page's own list response. Keep the
+        # verified dates/pair requirement and consider all eligible returns.
+        live = current_quotes() if current_quotes and not preferred_pair else ()
+        same_outbound = {quote.return_flight_no: quote for quote in (*options, *live)
+                         if outbound_pattern.fullmatch(quote.flight_no)}
+        diagnostics['detail_return_quote_candidates'] = len(same_outbound)
+        diagnostics['detail_selectable_flight_cards'] = selectable_cards.count()
+        diagnostics['detail_expanded_flight_cards'] = expanded_cards.count()
+        returns = sorted(same_outbound.values(), key=lambda q: q.price)
+        matches = []
+        for cards, already_expanded in ((expanded_cards, True), (selectable_cards, False)):
+            if matched := visible_pair(returns, 'return_flight_no', cards):
+                matches.append((*matched, already_expanded))
+        return min(matches, key=lambda match: match[0].price, default=None)
+
+    selection = wait(choose_return)
     if selection is None:
+        diagnostics['detail_visible_flight_cards'] = visible_cards.count()
         raise FetchFailure('parse_error', 'tongcheng_return_card_not_matched', prices=fallback)
-    original, inbound = selection
+    original, inbound, already_expanded = selection
     diagnostics['detail_selected_pair'] = [original.flight_no, original.return_flight_no]
-    inbound.get_by_text('选择', exact=True).and_(visible).click(timeout=ACTION_MS)
+    diagnostics['detail_return_already_expanded'] = already_expanded
+    if not already_expanded:
+        inbound.get_by_text('选择', exact=True).and_(visible).click(timeout=ACTION_MS)
     diagnostics['detail_stage'] = 'fare_cards'
-    fares = inbound.locator('..').locator('.pro-item-box:visible')
-    if not wait(lambda: fares.count()):
+    # The button changes from 选择 to 收起 after expanding. Re-bind by the
+    # selected flight and the visible fare rows instead of using that button.
+    return_pattern = flight_pattern(original.return_flight_no)
+    containers = visible_cards.filter(has_text=return_pattern).locator('..').filter(
+        has=page.locator('.pro-item-box:visible'))
+    if not wait(lambda: containers.count() == 1):
+        diagnostics['detail_fares_seen'] = 0
         raise FetchFailure('parse_error', 'tongcheng_fare_cards_missing', prices=fallback)
-    candidates = []
-    for fare in fares.all():
-        text = fare.inner_text(timeout=ACTION_MS)
-        price = fare_price(text)
-        if price is not None:
-            candidates.append((price, fare, text))
-    detailed = []
-    diagnostics['detail_fares_seen'] = fares.count()
-    diagnostics['detail_plain_fares'] = len(candidates)
-    for price, fare, text in sorted(candidates, key=lambda row: row[0])[:3]:
-        if time.monotonic() >= deadline:
-            break
-        check()
-        diagnostics['detail_stage'] = 'baggage_popup'
-        note, legs = fare_checked_baggage(text)
-        if len(legs) != 2 or _baggage_controls(fare).count():
-            try:
-                legs.update(_panel_baggage(page, fare, wait, diagnostics, check_access))
-            except BrowserTimeout:
-                diagnostics['detail_baggage_timeout'] = True
-        offer = {'itinerary_confirmed': True, 'tax_inclusive_ticket_confirmed': True,
-                 'cabin': 'economy', **legs}
-        if note:
-            offer['fare_rule'] = note
-        quote = replace(original, price=price, price_basis='selected_round_trip_tax',
-            baggage_offer=offer,
-            extra=json.dumps({'cabin': '经济舱', 'cabin_verified': True,
-                'selected_fare_verified': True, 'final_fare_verified': False,
-                'baggage_offer': offer,
-                'refund_rule': '不得退改' if '不得退改' in text else '以页面规则为准'}, ensure_ascii=False))
-        detailed.append(quote)
-        if baggage_total(quote) is not None:
-            break
+    fares = containers.locator('.pro-item-box:visible')
+    detailed = _inspect_fare_rows(page, fares, original, check, wait, check_access, diagnostics, deadline)
+    if not diagnostics['detail_plain_fares']:
+        raise FetchFailure('parse_error', 'tongcheng_no_eligible_economy_fare', prices=fallback)
     complete = sum(DIRECTIONS.keys() <= quote.baggage_offer.keys() for quote in detailed)
     diagnostics['detail_verified_fares'] = sum(baggage_total(quote) is not None for quote in detailed)
     diagnostics['detail_fares_with_both_rules'] = complete
     diagnostics['detail_fares_with_card_rule'] = sum('fare_rule' in quote.baggage_offer for quote in detailed)
+    diagnostics['detail_confirmed_directions'] = {
+        key: sum(key in quote.baggage_offer for quote in detailed) for key in DIRECTIONS
+    }
     diagnostics['detail_status'] = 'ok' if complete else 'unverified'
-    diagnostics['detail_stage'] = 'complete'
+    diagnostics['detail_stage'] = 'complete' if complete else 'baggage_rules_incomplete'
     if not complete:
         detailed_keys = {(q.flight_no, q.return_flight_no, q.price) for q in detailed}
         listed = [q for q in sorted(fallback, key=lambda q: q.price)
                   if (q.flight_no, q.return_flight_no, q.price) not in detailed_keys]
-        raise FetchFailure('parse_error', 'tongcheng_two_direction_baggage_not_verified',
-                           prices=(detailed + listed)[:3])
+        if not diagnostics.get('detail_baggage_controls'):
+            evidence = 'tongcheng_baggage_control_not_found'
+        elif not any(diagnostics.get(key) for key in (
+                'detail_baggage_tables', 'detail_baggage_surfaces', 'detail_baggage_linked_pages')):
+            evidence = 'tongcheng_baggage_control_did_not_open_rules'
+        else:
+            evidence = 'tongcheng_two_direction_baggage_not_verified'
+        raise FetchFailure('parse_error', evidence, prices=(detailed + listed)[:3])
     return detailed

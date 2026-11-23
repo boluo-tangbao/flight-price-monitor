@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,6 +15,25 @@ from scripts.compare_round_trip import main as comparison_main, run_comparison
 
 
 class ComparisonTest(unittest.TestCase):
+    def test_command_lists_only_verified_fares_by_default(self):
+        cfg = load_config(str(Path(__file__).resolve().parents[1] / "config.monitor.yaml"))
+        for args in ([], ["--diagnostics"]):
+            with self.subTest(args=args), patch("sys.argv", ["compare_round_trip.py", *args]), patch(
+                    "scripts.compare_round_trip.load_config", return_value=cfg
+            ), patch("scripts.compare_round_trip.run_comparison", return_value={
+                "best_verified": [],
+                "ranked_verified": [],
+                "pending_baggage": [{"ticket_price_cny": 2688}],
+                "pending_at_or_below_best_total": [{"ticket_price_cny": 2688}],
+                "platforms": {"tongcheng": {"pending_quotes": 1, "diagnostics": {"detail_stage": "return_card"}}},
+            }), patch("builtins.print") as printed:
+                self.assertEqual(comparison_main(), 2)
+            result = json.loads(printed.call_args.args[0])
+            self.assertEqual("pending_baggage" in result, bool(args))
+            self.assertEqual("pending_at_or_below_best_total" in result, bool(args))
+            self.assertEqual("diagnostics" in result["platforms"]["tongcheng"], bool(args))
+            self.assertEqual(result["platforms"]["tongcheng"]["pending_quotes"], 1)
+
     def test_fixed_command_uses_configured_list_and_accepts_override(self):
         cfg = load_config(str(Path(__file__).resolve().parents[1] / "config.monitor.yaml"))
         cfg["comparison"]["platforms"] = ["tongcheng", "ctrip", "tongcheng"]
@@ -77,17 +97,22 @@ class ComparisonTest(unittest.TestCase):
                  "cabin": "economy", "outbound": allowance, "inbound": allowance}
         ctrip = RoundTripQuote("ctrip", "SHA", "OSA", route.dates[0], 2553, flight_no="NH976",
                               return_date=route.return_dates[0], return_flight_no="NH416", baggage_offer=offer)
-        tongcheng = replace(ctrip, platform="tongcheng", price=2500,
-                           baggage_offer={**offer, "inbound": {**allowance, "additional_fee_cny": 255}})
+        tongcheng = replace(ctrip, platform="tongcheng", price=2949)
+        paid_baggage = replace(tongcheng, price=2500, baggage_offer={
+            **offer, "inbound": {**allowance, "additional_fee_cny": 25}})
         third = replace(tongcheng, platform="third", price=2553, baggage_offer=offer)
+        no_free = {"confirmed": True, "rule": "无免费托运"}
+        bare_fare = replace(tongcheng, price=2450, baggage_offer={
+            **offer, "outbound": no_free, "inbound": {}})
         results = {
             "ctrip": FetchResult("ok", [ctrip]),
-            "tongcheng": FetchResult("timeout", [tongcheng, replace(tongcheng, price=2400, baggage_offer={})]),
+            "tongcheng": FetchResult("timeout", [
+                tongcheng, paid_baggage, bare_fare, replace(tongcheng, price=2400, baggage_offer={})]),
             "third": FetchResult("ok", [third, replace(third, price=1, return_date="2027-02-23")]),
         }
         class Supported:
             def __init__(self, config, logger):
-                pass
+                self.round_trip_diagnostics = {"detail_fares_seen": 3}
 
             def fetch_round_trip(self):
                 pass
@@ -100,8 +125,15 @@ class ComparisonTest(unittest.TestCase):
         self.assertTrue(all(call.args[1:] == ("SHA", "OSA", "2027-02-15", "2027-02-22")
                             for call in collect.call_args_list))
         self.assertEqual([row["platform"] for row in report["best_verified"]], ["ctrip", "third"])
-        self.assertEqual(report["ranked_verified"][-1]["total_with_baggage_cny"], 2755)
+        self.assertEqual(report["ranked_verified"][-1]["total_with_baggage_cny"], 2949)
+        self.assertFalse(report["ranked_verified"][-1]["within_budget"])
+        self.assertEqual(len(report["ranked_verified"]), 3)
+        self.assertEqual([row["ticket_price_cny"] for row in report["pending_baggage"]], [2400])
+        self.assertIsNone(report["pending_baggage"][0]["within_budget"])
+        self.assertEqual(report["platforms"]["tongcheng"]["excluded_baggage_purchase_required"], 2)
+        self.assertTrue(report["itinerary"]["checked_baggage_included_in_fare"])
         self.assertEqual(report["pending_at_or_below_best_total"][0]["ticket_price_cny"], 2400)
         self.assertEqual(report["platforms"]["tongcheng"]["status"], "timeout")
+        self.assertEqual(report["platforms"]["tongcheng"]["diagnostics"], {"detail_fares_seen": 3})
         self.assertEqual(report["platforms"]["third"]["rejected_quotes"], 1)
         self.assertEqual(report["platforms"]["future"]["status"], "unsupported")

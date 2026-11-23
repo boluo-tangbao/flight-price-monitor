@@ -146,13 +146,23 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
 
     worker = TongchengDesktop(crawler, diagnostics, capture)
     if crawler.config.get('tongcheng_round_trip_fare_details') is True:
-        from .tongcheng_fare_details import read_details
+        from .tongcheng_fare_details import read_fare_inventory
         def detail_reader(page):
             fallback = list(quotes.values())
+
+            def check_detail_access(current_url, text, status=None):
+                check_access(current_url, text, status or diagnostics.get('page_http_status'))
+                check_access(current_url, text, api_status)
+                if api_status == 444:
+                    raise FetchFailure('blocked', 'tongcheng_list_request_rejected_444')
+
             try:
-                return read_details(page, fallback, check_access, diagnostics,
-                                    preferred_pair=crawler.config.get('tongcheng_detail_pair'))
+                return read_fare_inventory(
+                    page, (origin, destination, depart, back, url), fallback, check_detail_access, diagnostics,
+                    preferred_pair=crawler.config.get('tongcheng_detail_pair'),
+                    current_quotes=lambda: list(quotes.values()))
             except FetchFailure as error:
+                diagnostics.setdefault('detail_status', error.status)
                 error.prices = sorted(error.prices, key=lambda q: (
                     q.price_basis != "selected_round_trip_tax", q.price))[:3]
                 raise

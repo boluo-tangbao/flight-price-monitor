@@ -17,7 +17,10 @@ from main import build_routes, load_config
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--login", action="store_true")
-    ap.add_argument("--details", action="store_true", help="Inspect one selected fare and both baggage directions without booking")
+    ap.add_argument("--details", action="store_true",
+                    help="Read visible fare cards for up to eight round-trip pairs without booking")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="Read fare details with stage counters and stop at any verification prompt")
     ap.add_argument("--outbound-flight", help="Keep the detail check on this outbound flight")
     ap.add_argument("--return-flight", help="Keep the detail check on this return flight")
     ap.add_argument("--browser-channel", choices=("msedge", "chrome"))
@@ -25,14 +28,18 @@ def main():
     args = ap.parse_args()
     if bool(args.outbound_flight) != bool(args.return_flight):
         ap.error('Specify both --outbound-flight and --return-flight')
+    if args.login and args.diagnose:
+        ap.error('Run --login and --diagnose separately')
     logging.basicConfig(level=logging.INFO)
-    crawler = TongchengCrawler({"headless": False, "timeout_seconds": 35,
-                              "user_data_dir": args.user_data_dir,
-                              "tongcheng_pc_browser_channel": args.browser_channel,
-                              "tongcheng_round_trip_fare_details": args.details or bool(args.outbound_flight),
-                              "tongcheng_detail_pair": [args.outbound_flight, args.return_flight]
-                                  if args.outbound_flight else None},
-                              logging.getLogger("tongcheng_acceptance"))
+    settings = {
+        "headless": False, "timeout_seconds": 35, "user_data_dir": args.user_data_dir,
+        "tongcheng_pc_browser_channel": args.browser_channel,
+        "tongcheng_round_trip_fare_details": args.details or args.diagnose or bool(args.outbound_flight),
+        "tongcheng_detail_pair": [args.outbound_flight, args.return_flight] if args.outbound_flight else None,
+    }
+    if args.diagnose:
+        settings["slider"] = {"auto": False}
+    crawler = TongchengCrawler(settings, logging.getLogger("tongcheng_acceptance"))
     if args.login:
         with desktop(crawler, headed=True, login=True) as ctx:
             crawler.tongcheng_pc_session.new_page(ctx)

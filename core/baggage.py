@@ -3,6 +3,14 @@ import math
 import re
 
 
+_NO_FREE_BAGGAGE = re.compile(r"(?:无免费|不含免费)(?:托运(?:行李(?:额度|额)?)?|行李额)[。.]?")
+
+
+def _no_free_baggage(item):
+    return item.get("no_free") is True or bool(
+        _NO_FREE_BAGGAGE.fullmatch(str(item.get("rule") or "").strip()))
+
+
 def _confirmed_allowance(item):
     if item.get("confirmed") is not True:
         return None
@@ -18,6 +26,19 @@ def _confirmed_allowance(item):
     return pieces, kg, fee
 
 
+def requires_baggage_purchase(quote):
+    """Whether either direction of the matched fare requires buying checked baggage."""
+    offer = quote.baggage_offer or {}
+    if offer.get("itinerary_confirmed") is not True:
+        return False
+    for leg in ("outbound", "inbound"):
+        item = offer.get(leg) or {}
+        allowance = _confirmed_allowance(item)
+        if _no_free_baggage(item) or (allowance is not None and allowance[2] > 0):
+            return True
+    return False
+
+
 def checked_baggage_labels(quote):
     """Explain the checked allowance for each leg of this specific fare."""
     offer = quote.baggage_offer or {}
@@ -27,10 +48,7 @@ def checked_baggage_labels(quote):
         matched = offer.get("itinerary_confirmed") is True
         allowance = _confirmed_allowance(item) if matched else None
         if allowance is None:
-            rule = str(item.get("rule") or "").strip()
-            no_free = matched and re.fullmatch(
-                r"(?:无免费|不含免费)(?:托运(?:行李(?:额)?)?|行李额)[。.]?", rule)
-            labels[leg] = "无免费托运" if no_free else "待确认"
+            labels[leg] = "无免费托运" if matched and _no_free_baggage(item) else "待确认"
             continue
         pieces, kg, fee = allowance
         units = []
