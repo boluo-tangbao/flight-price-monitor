@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import date
 import json
 import re
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from playwright.sync_api import Error as BrowserError
 
@@ -17,6 +17,36 @@ from core.models import RoundTripQuote
 
 ROUTE = ("SHA", "OSA")
 RESULT_HOSTS = {"www.ly.com", "tiflight.ly.com", "m.ly.com", "ly.com"}
+NAVIGATION_HOSTS = RESULT_HOSTS | {"passport.ly.com", "login.ly.com"}
+
+
+def navigation_summary(current, original):
+    """Classify navigation without exporting URL parameters or unknown paths."""
+    actual, expected = map(urlsplit, (current, original))
+    para = parse_qs(actual.query).get("para")
+    known_host = actual.hostname in NAVIGATION_HOSTS
+    if actual.path in ("/", "/iflight/book1.html") and known_host:
+        path = actual.path
+    elif known_host and (actual.hostname in ("passport.ly.com", "login.ly.com")
+                         or actual.path.lower().startswith(("/login", "/pass", "/member/"))):
+        path = "login_related"
+    elif known_host and actual.path.startswith("/iflight/"):
+        path = "other_iflight_page"
+    else:
+        path = "other"
+    return {"host": actual.hostname if known_host else "other_or_blank", "path": path,
+            "search_parameter": ("missing" if para is None else "matching" if
+                                 para == parse_qs(expected.query).get("para") else "different"),
+            "same_search_location": ((actual.scheme, actual.hostname, actual.path) ==
+                                     (expected.scheme, expected.hostname, expected.path))}
+
+
+def cloud_report_diagnostics(diagnostics):
+    keys = ("auth_cookie_in_search_context", "document_trail", "final_destination",
+            "page_http_status", "list_outcome", "list_response_count", "list_http_statuses",
+            "list_payload_count", "list_business_codes", "offer_rows_seen", "matched_offer_rows",
+            "unrecognized_list_host_count", "search_document_requests", "detail_stage", "detail_status")
+    return {key: diagnostics[key] for key in keys if key in diagnostics}
 
 
 def search_url(origin, destination, depart, back):
@@ -152,6 +182,7 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
         return len(quotes), list_done
 
     worker = TongchengDesktop(crawler, diagnostics)
+    worker.expected_search_url = url
     if crawler.config.get('tongcheng_round_trip_fare_details') is True:
         from .tongcheng_fare_details import read_fare_inventory
         def detail_reader(page):

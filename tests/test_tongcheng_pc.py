@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from core.collection import FetchFailure
 from crawlers.tongcheng_pc import TongchengDesktop
-from crawlers.tongcheng_roundtrip import desktop, fetch_round_trip
+from crawlers.tongcheng_roundtrip import cloud_report_diagnostics, desktop, fetch_round_trip
 from crawlers.tongcheng_upstream import browser, captcha, challenge
 
 TRIP = ("SHA", "OSA", "2027-02-15", "2027-02-22")
@@ -72,6 +72,31 @@ class UpstreamTests(unittest.TestCase):
         self.crawler = SimpleNamespace(config={"headless": False, "timeout_seconds": 35,
             "tongcheng_pc_browser_channel": "msedge"}, user_data_root=self.root.name,
             logger=logging.getLogger("offline-tongcheng"), headless=False)
+
+    def test_cloud_diagnostic_identifies_redirect_without_recording_private_path(self):
+        self.crawler.cloud_storage_state = {"cookies": [], "origins": []}
+        diagnostics = {}
+        worker = TongchengDesktop(self.crawler, diagnostics)
+        worker.expected_search_url = worker._intl_rt_url(*TRIP)
+        page = Page()
+        page.main_frame = object()
+        ctx = Mock()
+        ctx.new_page.return_value = page
+        ctx.cookies.return_value = [{"name": "memberIdNew", "value": "hidden-cookie"}]
+        with patch("core.cloud_session.cloud_desktop", return_value=nullcontext(ctx)):
+            with worker.browser():
+                worker.new_page(ctx)
+                req = SimpleNamespace(resource_type="document", frame=page.main_frame)
+                page.emit_response(SimpleNamespace(url=worker.expected_search_url, request=req, status=302))
+                page.url = "https://passport.ly.com/login/hidden-path?token=hidden-token"
+                page.emit_response(SimpleNamespace(url=page.url, request=req, status=200))
+        diagnostics["detail_fare_inventory"] = [{"text": "hidden-inventory"}]
+        report = cloud_report_diagnostics(diagnostics)
+        self.assertTrue(report["auth_cookie_in_search_context"])
+        self.assertEqual([row["http"] for row in report["document_trail"]], [302, 200])
+        self.assertEqual(report["final_destination"], {"host": "passport.ly.com", "path": "login_related",
+                         "search_parameter": "missing", "same_search_location": False})
+        self.assertNotIn("hidden-", json.dumps(report))
 
     def run_page(self, page):
         ctx = Mock()

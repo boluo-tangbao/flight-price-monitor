@@ -60,13 +60,14 @@ def build_routes(cfg: dict):
     return routes
 
 
-def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comparison=False, cloud=False):
+def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *,
+             comparison=False, cloud=False, cloud_platform=None):
     crawler_cfg = cfg.get("crawler", {})
     platforms = cfg.get("platforms", ["ctrip", "fliggy", "tongcheng"])
     routes = build_routes(cfg)
     if comparison:
         validate_comparison_route(routes)
-        platforms, crawler_cfg = comparison_settings(cfg, REGISTRY)
+        platforms, crawler_cfg = comparison_settings(cfg, REGISTRY, [cloud_platform] if cloud_platform else None)
     cloud_state = detach_cloud_states() if cloud else {}
     cloud_errors = {}
     if cloud:
@@ -126,6 +127,11 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comp
             if comparison:
                 report = compare_round_trips(route, route.dates[0], route.return_dates[0], round_results)
                 if cloud:
+                    if "tongcheng" in report["platforms"]:
+                        from crawlers.tongcheng_roundtrip import cloud_report_diagnostics
+                        tongcheng = next(c for c in crawlers if c.name == "tongcheng")
+                        report["platforms"]["tongcheng"]["diagnostics"] = cloud_report_diagnostics(
+                            getattr(tongcheng, "round_trip_diagnostics", {}))
                     out = Path(cfg.get("output", {}).get("db_path", "data/prices.db")).with_name("comparison.json")
                     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
                 alerter.report_joint_round_trip(route, report)
@@ -143,6 +149,7 @@ def main():
     ap.add_argument("--once", action="store_true", help="只运行一次后退出")
     ap.add_argument("--compare", action="store_true", help="按 comparison 配置做多平台联合监控")
     ap.add_argument("--cloud", action="store_true", help="从 Actions Secrets 加载三平台会话并导出联合结果")
+    ap.add_argument("--cloud-platform", choices=["tongcheng"], help="只诊断该云端平台，不发微信")
     ap.add_argument("--browser-channel", choices=["chromium", "chrome", "msedge"],
                     help="携程电脑版使用的浏览器；登录和采集使用相同选项")
     ap.add_argument("--login", metavar="PLATFORM",
@@ -150,6 +157,8 @@ def main():
     args = ap.parse_args()
     if args.cloud and (not args.compare or not args.once or args.login):
         ap.error("--cloud requires --compare --once and cannot be used with --login")
+    if args.cloud_platform and not args.cloud:
+        ap.error("--cloud-platform requires --cloud")
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -188,7 +197,7 @@ def main():
         return
 
     storage = PriceStorage(out.get("db_path", "data/prices.db"))
-    notifier = build_notifier(cfg.get("notifier"), logger)
+    notifier = None if args.cloud_platform else build_notifier(cfg.get("notifier"), logger)
     if notifier:
         logger.info("已启用推送: %s", type(notifier).__name__)
     notify_cfg = cfg.get("notifier") or {}
@@ -201,7 +210,8 @@ def main():
     )
 
     try:
-        job = make_job(cfg, logger, storage, alerter, comparison=args.compare, cloud=args.cloud)
+        job = make_job(cfg, logger, storage, alerter, comparison=args.compare,
+                       cloud=args.cloud, cloud_platform=args.cloud_platform)
     except ValueError as error:
         ap.error(str(error))
 

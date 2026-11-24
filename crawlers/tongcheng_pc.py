@@ -3,6 +3,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from contextlib import contextmanager
 
+from playwright.sync_api import Error as BrowserError
+
 from .tongcheng_upstream.browser import BaseCrawler
 from .tongcheng_upstream.roundtrip import InternationalRoundTrip
 from .tongcheng_upstream.challenge import ensure_slider_handler
@@ -66,10 +68,25 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             from core.cloud_session import cloud_desktop
             desktop = cloud_desktop(self.cloud_storage_state, {"width": 1366, "height": 900})
         with desktop as ctx:
-            yield ctx
-            reader = getattr(self, 'detail_reader', None)
-            if reader is not None and self.last_outcome in ('ok', 'error') and self._last_page is not None:
-                self.detail_quotes = reader(self._last_page)
+            expected = getattr(self, "expected_search_url", None)
+            inspect_cloud = self.cloud_storage_state is not None and expected is not None
+            if inspect_cloud:
+                # Existence only. It does not prove that the service accepts the session.
+                try:
+                    self.diagnostics["auth_cookie_in_search_context"] = any(
+                        item["name"] in self.AUTH_COOKIES and bool(item.get("value"))
+                        for item in ctx.cookies([expected]))
+                except BrowserError:
+                    self.diagnostics["auth_cookie_in_search_context"] = None
+            try:
+                yield ctx
+                reader = getattr(self, 'detail_reader', None)
+                if reader is not None and self.last_outcome in ('ok', 'error') and self._last_page is not None:
+                    self.detail_quotes = reader(self._last_page)
+            finally:
+                if inspect_cloud and self._last_page is not None:
+                    from .tongcheng_roundtrip import navigation_summary
+                    self.diagnostics["final_destination"] = navigation_summary(self._last_page.url, expected)
 
     def _watch_retry_after(self, page):
         # The pilot records only safe response counts/statuses via capture.
@@ -78,6 +95,17 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             target = urlsplit(response.url)
             if target.hostname == "www.ly.com" and target.path == "/iflight/book1.html":
                 self.diagnostics["page_http_status"] = response.status
+            if self.cloud_storage_state is None or response.request.resource_type != "document":
+                return
+            try:
+                is_main = response.request.frame == page.main_frame
+            except BrowserError:
+                return
+            if is_main:
+                from .tongcheng_roundtrip import navigation_summary
+                trail = self.diagnostics.setdefault("document_trail", [])
+                if len(trail) < 12 and (expected := getattr(self, "expected_search_url", None)):
+                    trail.append(dict(navigation_summary(response.url, expected), http=response.status))
         page.on("response", page_status)
 
     def path_gate(self, path, dim="", **kwargs):
@@ -86,6 +114,7 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
 
     def path_note(self, path, status, **kwargs):
         self.last_outcome = status
+        self.diagnostics["list_outcome"] = status
 
     def _sleep(self):
         # The pilot has exactly one date; there is no next query to pace.

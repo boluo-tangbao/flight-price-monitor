@@ -8,9 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       preview_comparison:
-        description: 'Test three-platform comparison once without WeChat or production history'
+        description: 'Test comparison once without WeChat or production history'
         type: boolean
         default: false
+      preview_platform:
+        description: 'Only used when preview_comparison is checked'
+        type: choice
+        options: [all, tongcheng]
+        default: all
 
 permissions:
   contents: read
@@ -53,12 +58,15 @@ jobs:
       - name: Query configured Shanghai Osaka round trip once
         env:
           COMPARISON: ${{ inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true' }}
-          CTRIP_STORAGE_STATE_B64: ${{ secrets.CTRIP_STORAGE_STATE_B64 }}
+          TONGCHENG_ONLY: ${{ inputs.preview_comparison == true && inputs.preview_platform == 'tongcheng' }}
+          CTRIP_STORAGE_STATE_B64: ${{ (inputs.preview_comparison != true || inputs.preview_platform != 'tongcheng') && secrets.CTRIP_STORAGE_STATE_B64 || '' }}
           TONGCHENG_STORAGE_STATE_B64: ${{ (inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true') && secrets.TONGCHENG_STORAGE_STATE_B64 || '' }}
-          FLIGGY_STORAGE_STATE_B64: ${{ (inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true') && secrets.FLIGGY_STORAGE_STATE_B64 || '' }}
+          FLIGGY_STORAGE_STATE_B64: ${{ (inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true') && (inputs.preview_comparison != true || inputs.preview_platform != 'tongcheng') && secrets.FLIGGY_STORAGE_STATE_B64 || '' }}
           SERVERCHAN_SEND_KEY: ${{ inputs.preview_comparison != true && (secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY) || '' }}
         run: |
-          if [ "$COMPARISON" = "true" ]; then
+          if [ "$TONGCHENG_ONLY" = "true" ]; then
+            python main.py -c config.monitor.yaml --once --compare --cloud --cloud-platform tongcheng
+          elif [ "$COMPARISON" = "true" ]; then
             python main.py -c config.monitor.yaml --once --compare --cloud
           else
             python main.py -c config.monitor.yaml --once

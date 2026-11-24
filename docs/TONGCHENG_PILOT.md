@@ -45,6 +45,11 @@ python main.py -c config.monitor.yaml --compare
    `ranked_ticket` 是原始票价，`ranked_verified` 是经两程托运硬条件筛选的报价。
    本地查询通过不能证明平台认可 Linux 上恢复的会话，需要核对每家状态和报价。
 
+   如果只排查同程，勾选 `preview_comparison` 并把 `preview_platform` 选为 `tongcheng`。
+   这次只读同程，会在 `comparison.json` 的 `platforms.tongcheng.diagnostics` 记录浏览器内是否有
+   同程已知的登录 Cookie（只有存在性，不代表服务器接受登录）、导航状态码、页面归类、行程参数状态及报价响应计数。
+   第三方地址和未识别路径只记录类别。报告不含页面正文、原始查询参数或 Cookie 值。
+
 3. 验收后，在仓库 Settings → Secrets and variables → Actions → Variables 添加
    `FLIGHT_MONITOR_COMPARISON_ENABLED=true`，并保持 `FLIGHT_MONITOR_ENABLED=true`。
    下一次定时任务会发一条三平台合并推送。移除联合开关即可回到原有携程定时路径。
