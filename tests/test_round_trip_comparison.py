@@ -11,6 +11,7 @@ from core.collection import FetchResult
 from core.cloud_session import SESSION_SECRETS, encode_state
 from core.alerter import Alerter
 from core.models import Route, RoundTripQuote
+from core.round_trip_comparison import compare_round_trips
 from core.storage import PriceStorage
 from main import load_config, make_job
 from scripts.compare_round_trip import main as comparison_main, run_comparison
@@ -139,6 +140,40 @@ class ComparisonTest(unittest.TestCase):
         self.assertNotIn("2,300", strict)
         self.assertIn("2,300", raw)
         self.assertIn("回程托运 无免费托运", raw)
+
+    def test_notification_explains_partial_results_and_list_only_prices(self):
+        route = Route("SHA", "上海", "OSA", "大阪", ["2027-02-15"], 2800,
+                      "round_trip", ["2027-02-22"], True)
+        depart, back = route.dates[0], route.return_dates[0]
+        allowance = {"confirmed": True, "pieces": 2, "weight_kg": 23, "additional_fee_cny": 0}
+        offer = {"itinerary_confirmed": True, "tax_inclusive_ticket_confirmed": True,
+                 "cabin": "economy", "outbound": allowance, "inbound": allowance}
+        verified = RoundTripQuote("ctrip", "SHA", "OSA", depart, 3034, flight_no="9C6575",
+                                  return_date=back, return_flight_no="9C6576", baggage_offer=offer)
+        no_free = replace(verified, baggage_offer={**offer, "inbound": {"rule": "无免费托运"}})
+        unknown = replace(verified, price=2724, price_basis="selected_round_trip_tax",
+                          baggage_offer={"fare_rule": "无免费托运行李"})
+        list_only = replace(verified, price=2555, flight_no="NH976", return_flight_no="",
+                            price_basis="product_round_trip_tax", baggage_offer={})
+        results = {
+            "ctrip": FetchResult("parse_error", [verified] * 3 + [no_free] * 2 + [unknown] + [list_only] * 3,
+                                 "fare_baggage_rules_incomplete"),
+            "tongcheng": FetchResult("error", evidence="tongcheng_list_http_406"),
+            "fliggy": FetchResult("blocked", [replace(verified, platform="fliggy", price=2757)] * 4
+                                  + [replace(no_free, platform="fliggy")] * 4,
+                                  "fliggy_desktop_verification_required"),
+        }
+        notifier = Mock()
+        report = compare_round_trips(route, depart, back, results)
+        Alerter(logging.getLogger("notification-test"), notifier).report_joint_round_trip(route, report)
+        _, body = notifier.send.call_args.args
+        self.assertIn("NH976 · 列表往返起价 ¥2,555.00 · 往返航班未配对", body)
+        self.assertIn("3 条是未配对航班的参考价，1 条托运待核实", body)
+        self.assertIn("票面标注 无免费托运行李 · 两程托运范围待核实", body)
+        self.assertIn("携程 · 已返回 9 条（部分托运规则未读全），"
+                      "含两程托运已核实 3 条、托运待核实 1 条、仅参考价 3 条、需另购托运 2 条", body)
+        self.assertIn("同程 · 采集失败（报价接口返回 HTTP 406），本轮无报价", body)
+        self.assertIn("飞猪 · 已返回 8 条（本轮遇到验证），含两程托运已核实 4 条、需另购托运 4 条", body)
 
     def test_one_round_compares_verified_totals_and_preserves_incomplete_platforms(self):
         route = Route("SHA", "上海", "OSA", "大阪", ["2027-02-15"], 2800,

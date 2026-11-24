@@ -1,4 +1,5 @@
 """低价提醒 + 微信推送（带去抖）"""
+from collections import Counter
 import logging
 from typing import List, Optional
 
@@ -11,7 +12,13 @@ PLATFORM_NAMES = {"ctrip": "携程", "tongcheng": "同程", "fliggy": "飞猪",
                   "qunar": "去哪儿", "tuniu": "途牛"}
 COLLECTION_STATUS = {"ok": "已返回报价", "empty": "明确无票", "timeout": "采集超时",
                      "login_required": "需登录", "blocked": "查询受阻",
-                     "parse_error": "详情未核实", "unsupported": "暂不支持"}
+                     "parse_error": "详情未核实", "unsupported": "暂不支持",
+                     "error": "采集失败"}
+JOINT_COLLECTION_EVIDENCE = {
+    "fare_baggage_rules_incomplete": "部分托运规则未读全",
+    "tongcheng_list_http_406": "报价接口返回 HTTP 406",
+    "fliggy_desktop_verification_required": "本轮遇到验证",
+}
 TICKET_PRICE_LABELS = {"product_round_trip_tax": "列表往返起价",
                        "tongcheng_listed_round_trip_tax": "列表往返含税价",
                        "fliggy_calendar_round_trip_tax": "日历往返价（参考）",
@@ -71,29 +78,51 @@ class Alerter:
             flights = " / ".join(flight for flight in (row["flight_no"], row["return_flight_no"]) if flight)
             label = TICKET_PRICE_LABELS.get(row["price_basis"], "平台往返票价")
             legs = row["checked_baggage"]
+            baggage = (f"去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}"
+                       if row["flight_no"] and row["return_flight_no"] else "往返航班未配对")
             view = f" · [查看报价]({row['source_url']})" if row["source_url"] else ""
             lines.append(f"- {platform} · {flights or '航班待确认'} · {label} ¥{row['ticket_price_cny']:,.2f}"
-                         f" · 去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}{view}")
+                         f" · {baggage}{view}")
 
         pending = [row for row in report["pending_baggage"]
                    if len(ranked) < 5 or row["ticket_price_cny"] <= cutoff]
         if pending:
             lowest = pending[0]
             platform = PLATFORM_NAMES.get(lowest["platform"], lowest["platform"])
-            lines.extend(["", f"另有 {len(pending)} 条票价可能影响榜单，尚待核实。"
-                           f"最低已读票价为 {platform} ¥{lowest['ticket_price_cny']:,.2f}。"])
+            reference_count = sum(not (row["flight_no"] and row["return_flight_no"]) for row in pending)
+            paired_count = len(pending) - reference_count
+            lines.extend(["", f"另有 {len(pending)} 条票价可能影响榜单。"
+                           f"其中 {reference_count} 条是未配对航班的参考价，{paired_count} 条托运待核实。"
+                           f"最低待核实票价为 {platform} ¥{lowest['ticket_price_cny']:,.2f}。"])
             for row in [item for item in pending if item["fare_baggage_rule"]][:3]:
                 platform = PLATFORM_NAMES.get(row["platform"], row["platform"])
                 legs = row["checked_baggage"]
+                baggage = ("两程托运范围待核实" if all(leg == "待确认" for leg in legs.values())
+                           else f"去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}")
                 lines.append(f"- {platform} · {row['flight_no']} / {row['return_flight_no']}"
                              f" · ¥{row['ticket_price_cny']:,.2f} · 票面标注 {row['fare_baggage_rule']}"
-                             f" · 去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}")
+                             f" · {baggage}")
+
+        unpaired = Counter(row["platform"] for row in report["pending_baggage"]
+                           if not (row["flight_no"] and row["return_flight_no"]))
         lines.extend(["", "**各平台采集情况**"])
         for name, status in report["platforms"].items():
             label = PLATFORM_NAMES.get(name, name)
-            outcome = COLLECTION_STATUS.get(status["status"], status["status"])
-            lines.append(f"- {label} · {outcome}，已核实 {status['verified_quotes']} 条，"
-                         f"待核实 {status['pending_quotes']} 条。")
+            outcome = COLLECTION_STATUS.get(status["status"], "采集异常")
+            evidence = JOINT_COLLECTION_EVIDENCE.get(status["evidence"])
+            if not status["ticket_quotes"]:
+                reason = f"（{evidence}）" if evidence else ""
+                lines.append(f"- {label} · {outcome}{reason}，本轮无报价。")
+                continue
+            counts = (
+                ("含两程托运已核实", status["verified_quotes"]),
+                ("托运待核实", status["pending_quotes"] - unpaired[name]),
+                ("仅参考价", unpaired[name]),
+                ("需另购托运", status["excluded_baggage_purchase_required"]),
+            )
+            breakdown = "、".join(f"{category} {count} 条" for category, count in counts if count)
+            note = f"（{evidence or outcome}）" if status["status"] not in ("ok", "empty") else ""
+            lines.append(f"- {label} · 已返回 {status['ticket_quotes']} 条{note}，{breakdown}。")
         description = "\n".join(lines)
         self.logger.info("[联合比价] %s\n%s", title, description)
         if self.notifier:
