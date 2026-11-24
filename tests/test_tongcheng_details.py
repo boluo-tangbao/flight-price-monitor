@@ -455,6 +455,42 @@ class TongchengDetailTests(unittest.TestCase):
                     'flight_no': '9C6581', 'return_flight_no': 'MM79',
                     'price_cny': 2495, 'outbound_card_matched': False})
 
+                with self.subTest("delayed departure list after reselect"):
+                    page.goto(url)
+                    page.evaluate("""() => {
+                        const renderOutbound = window.outbound;
+                        window.outbound = () => {
+                            document.querySelector('h1').remove();
+                            document.querySelector('button[onclick="outbound()"]').remove();
+                            setTimeout(renderOutbound, 1200);
+                        };
+                    }""")
+                    diagnostics = {}
+                    read_fare_inventory(page, (*route, url), listed, lambda *_: None, diagnostics, pair_limit=2)
+                    self.assertEqual(diagnostics['detail_pairs_scanned'],
+                                     [['9C6575', 'MM80'], ['9C6565', 'MM81']])
+
+                with self.subTest("a planned return appears after the first card"):
+                    page.goto(url)
+                    page.evaluate("""() => {
+                        const renderReturns = window.showReturns;
+                        window.showReturns = (out, chosen) => {
+                            renderReturns(out, chosen);
+                            if (chosen) return;
+                            const delayedCard = [...document.querySelectorAll('.flight-item')]
+                                .find(card => card.innerText.includes('MM081'));
+                            delayedCard.hidden = true;
+                            setTimeout(() => { delayedCard.hidden = false; }, 1200);
+                        };
+                    }""")
+                    delayed = RoundTripQuote('tongcheng', *route[:3], 2600, flight_no='9C6575',
+                                             return_date=route[3], return_flight_no='MM0081')
+                    diagnostics = {}
+                    read_fare_inventory(page, (*route, url), [listed[1], delayed], lambda *_: None,
+                                        diagnostics, pair_limit=2)
+                    self.assertEqual(diagnostics['detail_pairs_scanned'],
+                                     [['9C6575', 'MM80'], ['9C6575', 'MM81']])
+
                 page.goto(url)
                 page.add_style_tag(content='button[onclick="outbound()"] { display: none }')
                 diagnostics = {}
@@ -477,6 +513,14 @@ class TongchengDetailTests(unittest.TestCase):
 
                 page.goto(url)
                 page.evaluate("""() => {
+                    const spring = [...document.querySelectorAll('.flight-item')]
+                        .find(card => card.innerText.includes('9C6565'));
+                    const select = spring.querySelector('button');
+                    const flightBtn = document.createElement('div');
+                    flightBtn.className = 'flight-btn';
+                    flightBtn.innerHTML = '<span>余4张</span> 选择';
+                    flightBtn.setAttribute('onclick', select.getAttribute('onclick'));
+                    select.replaceWith(flightBtn);
                     const render = window.showReturns;
                     window.showReturns = (out, chosen) => {
                         render(out, chosen);
@@ -486,7 +530,11 @@ class TongchengDetailTests(unittest.TestCase):
                             header.before(wrapper);
                             wrapper.append(header);
                             const next = header.querySelector('button');
-                            if (next.textContent === '选择') next.textContent = '查看票价';
+                            if (next.textContent === '选择') {
+                                next.classList.add('flight-btn');
+                                next.innerHTML = '<span>余3张</span> 查看票价';
+                            }
+                            wrapper.after(next);
                         }
                         if (chosen === 79) {
                             const economyTab = [...document.querySelectorAll('button')]
@@ -506,6 +554,9 @@ class TongchengDetailTests(unittest.TestCase):
                 self.assertEqual(diagnostics['detail_return_transitions'][0]['status'], 'return_list_ready')
                 self.assertEqual([(quote.price, baggage_total(quote)) for quote in quotes],
                                  [(2688, None), (2949, 2949)])
+                self.assertEqual(quotes[-1].baggage_offer['outbound']['weight_kg'], 20)
+                self.assertEqual(quotes[-1].baggage_offer['inbound']['weight_kg'], 20)
+                self.assertIsNone(page.locator('body').get_attribute('data-booked'))
             finally:
                 browser.close()
 

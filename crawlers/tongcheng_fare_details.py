@@ -469,12 +469,13 @@ def _inspect_fare_rows(page, fares, original, check, wait, check_access, diagnos
         timed_out = time.monotonic() >= deadline
         if inventory is None and (timed_out or (best_total is not None and price > best_total)):
             break
-        if not timed_out:
+        if not timed_out and not DIRECTIONS.keys() <= legs.keys():
             check()
             diagnostics['detail_stage'] = 'baggage_popup'
             try:
-                legs.update(_panel_baggage(page, fare, wait, diagnostics, check_access,
-                                           known_legs=legs, deadline=deadline))
+                for leg, rule in _panel_baggage(page, fare, wait, diagnostics, check_access,
+                                                known_legs=legs, deadline=deadline).items():
+                    legs.setdefault(leg, rule)
             except BrowserTimeout:
                 diagnostics['detail_baggage_timeout'] = True
         offer = {'itinerary_confirmed': True, 'tax_inclusive_ticket_confirmed': True,
@@ -500,7 +501,11 @@ def _inspect_fare_rows(page, fares, original, check, wait, check_access, diagnos
 DISPLAY_FLIGHT = re.compile(r'(?<![A-Z0-9])((?:[A-Z][A-Z0-9]|[0-9][A-Z]))(\d{1,4})(?![A-Z0-9])')
 AIRCRAFT_PREFIX = re.compile(r'(?:空客|波音|空中客车|中国商飞|商飞|Airbus|Boeing)\s*$', re.I)
 RETURN_HEADING = re.compile(r'^选择\s*(?:返程|回程)')
-OPEN_RETURN_FARES = re.compile(r'^(?:选择(?:返程|回程)?|展开(?:报价)?|查看(?:报价|票价|价格))\s*[⌄∨﹀]?$')
+STOCK_PREFIX = r'(?:余\s*\d+\s*张\s*)?'
+SELECT_OUTBOUND = re.compile(rf'^{STOCK_PREFIX}选择(?:去程)?\s*[⌄∨﹀]?$')
+OPEN_RETURN_FARES = re.compile(
+    rf'^{STOCK_PREFIX}(?:选择(?:返程|回程)?|展开(?:报价)?|查看(?:报价|票价|价格))\s*[⌄∨﹀]?$'
+)
 RESELECT_OUTBOUND = re.compile(r'^(?:(?:返回|重新)选择|重选|更换|修改)去程$')
 CABIN_TAB = re.compile(rf'^({CABIN_NAME.pattern})\s*[¥￥]\s*([\d,.]+)\s*起$')
 
@@ -533,12 +538,29 @@ def _same_search(current, original):
             and parse_qs(actual.query).get('para') == parse_qs(expected.query).get('para'))
 
 
+FLIGHT_HEADER_XPATH = 'contains(concat(" ", normalize-space(@class), " "), " flight-item-main ")'
+
+
+def _flight_action(card, page, label):
+    visible = page.locator(':visible')
+    # The stock badge and selection label can share a single clickable div.
+    item = 'contains(concat(" ", normalize-space(@class), " "), " flight-item ")'
+    container = card.locator(f'xpath=ancestor::*[{item} and count(.//*[{FLIGHT_HEADER_XPATH}])=1][1]')
+    for scope in (card, container):
+        action = scope.locator('.flight-btn:visible').filter(has_text=label)
+        if action.count():
+            return action
+        action = scope.get_by_text(label).and_(visible)
+        if action.count():
+            return action
+    return action
+
+
 def _visible_fare_container(card, page):
     # Locate the nearest fare panel belonging to this flight header. A parent
     # with other flight headers might contain an entirely different offer.
-    header = 'contains(concat(" ", normalize-space(@class), " "), " flight-item-main ")'
     offer = 'contains(concat(" ", normalize-space(@class), " "), " pro-item-box ")'
-    return card.locator(f'xpath=ancestor::*[count(.//*[{header}])=1 and .//*[{offer}]][1]').filter(
+    return card.locator(f'xpath=ancestor::*[count(.//*[{FLIGHT_HEADER_XPATH}])=1 and .//*[{offer}]][1]').filter(
         has=page.locator('.pro-item-box:visible'))
 
 
@@ -587,11 +609,8 @@ def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
 
     visible = page.locator(':visible')
     flight_cards = page.locator('.flight-item-main:visible')
-    choose = page.get_by_text('选择', exact=True).and_(visible)
-    open_fares = page.get_by_text(OPEN_RETURN_FARES).and_(visible)
-    collapse = page.get_by_text(re.compile(r'^收起\s*[⌃∧︿]?$')).and_(visible)
+    collapse = re.compile(r'^收起\s*[⌃∧︿]?$')
     reselect = page.get_by_text(RESELECT_OUTBOUND).and_(visible)
-    selectable_out = flight_cards.filter(has=choose)
     return_heading = page.get_by_text(RETURN_HEADING).and_(page.locator(
         ':visible:not(:is(a, button, [role="button"]), :is(a, button, [role="button"]) *)'))
     requested_outbound = _card_number(preferred_pair[0]) if preferred_pair else None
@@ -601,15 +620,12 @@ def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
     def outbound_ready():
         if return_heading.count():
             return None
-        cards = _flight_cards(selectable_out)
+        cards = _flight_cards(flight_cards)
+        diagnostics['detail_visible_flight_cards'] = flight_cards.count()
+        diagnostics['detail_visible_outbound_cards'] = len(cards)
         if requested_outbound and requested_outbound not in cards:
             return None
         return cards
-
-    outbound_records = wait(outbound_ready)
-    if not outbound_records:
-        raise FetchFailure('parse_error', 'tongcheng_outbound_card_not_matched', prices=fallback)
-    diagnostics['detail_visible_outbound_cards'] = len(outbound_records)
 
     def listed_pairs():
         listed = {}
@@ -620,7 +636,15 @@ def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
                 listed[key] = row
         return listed
 
+    outbound_records = wait(outbound_ready)
     listed = listed_pairs()
+    if preferred_pair:
+        requested_pair = tuple(map(_card_number, preferred_pair))
+        diagnostics['detail_requested_pair_in_list'] = requested_pair in listed
+        diagnostics['detail_requested_outbound_in_list'] = any(pair[0] == requested_outbound for pair in listed)
+    if not outbound_records:
+        raise FetchFailure('parse_error', 'tongcheng_outbound_card_not_matched', prices=fallback)
+
     ranked = sorted(listed, key=lambda pair: (listed[pair].price, pair))
     diagnostics['detail_initial_list_leaders'] = [
         {'flight_no': pair[0], 'return_flight_no': pair[1], 'price_cny': listed[pair].price,
@@ -652,17 +676,25 @@ def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
                 break
             check()
             reselect.click(timeout=ACTION_MS)
-            if not wait(lambda: not return_heading.count() and _flight_cards(selectable_out)):
+            remaining_outbounds = set(list(targets)[index:])
+            if not wait(lambda: not reselect.count() and not return_heading.count()
+                        and not remaining_outbounds.isdisjoint(_flight_cards(flight_cards))):
                 diagnostics['detail_coverage_limit'] = 'outbound_list_not_restored'
                 break
             on_return_page = False
-        outbound = selectable_out.filter(has_text=flight_pattern(outward))
+        outbound = flight_cards.filter(has_text=flight_pattern(outward))
         if outbound.count() != 1:
+            continue
+        action = _flight_action(outbound, page, SELECT_OUTBOUND)
+        if action.count() != 1:
+            diagnostics['detail_outbound_action_unmatched'] = diagnostics.get('detail_outbound_action_unmatched', 0) + 1
+            if preferred_pair:
+                raise FetchFailure('parse_error', 'tongcheng_outbound_selection_control_not_matched', prices=fallback)
             continue
         diagnostics['detail_stage'] = 'return_card'
         diagnostics['detail_selected_outbound'] = outward
         check()
-        outbound.get_by_text('选择', exact=True).and_(visible).click(timeout=ACTION_MS)
+        action.click(timeout=ACTION_MS)
         transition = {'outbound': outward}
         transitions.append(transition)
 
@@ -685,12 +717,15 @@ def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
             return cards
 
         available = wait(visible_returns, 15)
-        if available and wanted and not set(wanted).intersection(available):
-            def planned_returns():
-                cards = visible_returns()
-                return cards if cards and set(wanted).intersection(cards) else None
+        planned = set(wanted)
+        if available and not planned.issubset(available):
+            def planned_returns_ready():
+                nonlocal available
+                if cards := visible_returns():
+                    available = cards
+                return planned.issubset(available)
 
-            available = wait(planned_returns, 4) or available
+            wait(planned_returns_ready, 4)
         can_reselect = reselect.count() == 1
         transition['reselect_visible'] = can_reselect
         on_return_page = bool(available or can_reselect or transition.get('return_heading_visible')
@@ -729,8 +764,8 @@ def read_fare_inventory(page, itinerary, fallback, check_access, diagnostics,
             diagnostics['detail_stage'] = 'fare_cards'
             try:
                 container = _visible_fare_container(inbound, page)
-                if not container.count() and not inbound.filter(has=collapse).count():
-                    action = inbound.get_by_text(OPEN_RETURN_FARES).and_(open_fares)
+                if not container.count() and not _flight_action(inbound, page, collapse).count():
+                    action = _flight_action(inbound, page, OPEN_RETURN_FARES)
                     if action.count() != 1:
                         diagnostics['detail_return_action_unmatched'] = diagnostics.get(
                             'detail_return_action_unmatched', 0) + 1

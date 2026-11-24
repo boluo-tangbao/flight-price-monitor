@@ -18,7 +18,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--login", action="store_true")
     ap.add_argument("--details", action="store_true",
-                    help="Read visible fare cards for up to eight round-trip pairs without booking")
+                    help="Read fare details and baggage for up to eight round-trip pairs (default)")
+    ap.add_argument("--list-only", action="store_true", help="Read only listed round-trip prices")
     ap.add_argument("--diagnose", action="store_true",
                     help="Read fare details with stage counters and stop at any verification prompt")
     ap.add_argument("--outbound-flight", help="Keep the detail check on this outbound flight")
@@ -30,15 +31,18 @@ def main():
         ap.error('Specify both --outbound-flight and --return-flight')
     if args.login and args.diagnose:
         ap.error('Run --login and --diagnose separately')
+    if args.list_only and (args.details or args.diagnose or args.outbound_flight):
+        ap.error('--list-only cannot be combined with fare-detail options')
+    read_details = not (args.login or args.list_only)
     logging.basicConfig(level=logging.INFO)
     settings = {
         "headless": False, "timeout_seconds": 35, "user_data_dir": args.user_data_dir,
         "tongcheng_pc_browser_channel": args.browser_channel,
-        "tongcheng_round_trip_fare_details": args.details or args.diagnose or bool(args.outbound_flight),
+        "tongcheng_round_trip_fare_details": read_details,
+        "tongcheng_keep_list_quotes": read_details and not args.outbound_flight,
+        "slider": {"auto": False},
         "tongcheng_detail_pair": [args.outbound_flight, args.return_flight] if args.outbound_flight else None,
     }
-    if args.diagnose:
-        settings["slider"] = {"auto": False}
     crawler = TongchengCrawler(settings, logging.getLogger("tongcheng_acceptance"))
     if args.login:
         with desktop(crawler, headed=True, login=True) as ctx:
@@ -49,6 +53,7 @@ def main():
     route = build_routes(load_config("config.monitor.yaml"))[0]
     result = collect(crawler, route.from_code, route.to_code, route.dates[0], route.return_dates[0])
     print(json.dumps({"platform": "tongcheng", "status": result.status, "evidence": result.evidence,
+                      "query_mode": "fare_details" if read_details else "list_only",
                       "queries": getattr(crawler, "round_trip_searches", 0), "notifications_sent": False,
                       "diagnostics": getattr(crawler, "round_trip_diagnostics", {}),
                       "quotes": [dict(quote.to_dict(), checked_baggage_total=baggage_total(quote),

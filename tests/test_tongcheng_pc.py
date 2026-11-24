@@ -1,18 +1,21 @@
 """Offline integration of pinned upstream browser, solver and RT branch."""
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
+from io import StringIO
 import json
 import logging
 import os
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, call, patch
 
-from core.collection import FetchFailure
+from core.collection import FetchFailure, FetchResult
 from crawlers.tongcheng_pc import TongchengDesktop
 from crawlers.tongcheng_roundtrip import cloud_report_diagnostics, desktop, fetch_round_trip
 from crawlers.tongcheng_upstream import browser, captcha, challenge
+from scripts import verify_tongcheng_round_trip
 
 TRIP = ("SHA", "OSA", "2027-02-15", "2027-02-22")
 
@@ -62,6 +65,29 @@ def response(payload, status=200):
 def offer():
     return {"data": {"res": [{"lng": "NH976_20270215|NH973_20270222",
             "tp": 2450, "acs": [{"an": "NH976", "acn": "ANA"}]}], "done": 1}}
+
+
+class VerificationScriptTests(unittest.TestCase):
+    def test_default_command_enables_baggage_details_and_list_only_opts_out(self):
+        route = SimpleNamespace(from_code=TRIP[0], to_code=TRIP[1],
+                                dates=[TRIP[2]], return_dates=[TRIP[3]])
+        for extra, mode, read_details in (([], "fare_details", True), (["--list-only"], "list_only", False)):
+            with self.subTest(mode=mode):
+                output = StringIO()
+                argv = ["verify_tongcheng_round_trip.py", "--browser-channel", "msedge", *extra]
+                with patch.object(sys, "argv", argv), redirect_stdout(output), \
+                        patch.object(verify_tongcheng_round_trip, "TongchengCrawler") as crawler, \
+                        patch.object(verify_tongcheng_round_trip, "load_config"), \
+                        patch.object(verify_tongcheng_round_trip, "build_routes", return_value=[route]), \
+                        patch.object(verify_tongcheng_round_trip, "collect", return_value=FetchResult("ok")) as collect:
+                    crawler.return_value = SimpleNamespace(round_trip_searches=1)
+                    self.assertEqual(verify_tongcheng_round_trip.main(), 0)
+                settings = crawler.call_args.args[0]
+                self.assertIs(settings["tongcheng_round_trip_fare_details"], read_details)
+                self.assertIs(settings["tongcheng_keep_list_quotes"], read_details)
+                self.assertFalse(settings["slider"]["auto"])
+                collect.assert_called_once_with(crawler.return_value, *TRIP)
+                self.assertEqual(json.loads(output.getvalue())["query_mode"], mode)
 
 
 class UpstreamTests(unittest.TestCase):
