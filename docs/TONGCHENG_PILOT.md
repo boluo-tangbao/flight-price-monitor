@@ -1,9 +1,9 @@
 # 同程国际往返独立验收
 
-## 携程和同程联合监控
+## 携程、同程和飞猪联合监控
 
 在 `config.monitor.yaml` 的 `comparison.platforms` 维护平台清单。目前清单包含携程
-（`ctrip`）和同程（`tongcheng`）。新增平台须先具备往返报价及详情采集能力。
+（`ctrip`）、同程（`tongcheng`）和飞猪（`fliggy`）。新增平台须先具备往返报价及详情采集能力。
 以后修改清单即可，单次和定时命令保持一致。
 
 ```powershell
@@ -25,9 +25,30 @@ python main.py -c config.monitor.yaml --compare
 定时模式每轮只推送一条消息，展示两榜前五（已核实榜保留并列）、两程托运和平台采集状态；
 标题的预算结论只引用已核实榜。单次验收默认在 JSON 输出两榜，只要取到了报价便正常结束。
 
-GitHub Actions 仍按正式的 `platforms` 清单执行。切换云端前，需要先验证同程的云端
-浏览器会话、两程托运详情和单轮运行时限。云端验收通过后，再把工作流的执行命令切换到
-联合模式，避免本地定时与云端任务重复推送。
+### GitHub Actions 切换到三平台
+
+1. 在项目目录的 `airline_monitoring` Conda 环境，关闭项目打开的同程、飞猪浏览器后，
+   运行下面的上传命令。各平台分别使用独立档案，只将对应站点登录态加密上传到
+   限定 `main` 分支的 `ctrip-cloud` Environment。飞猪包括项目专用档案中的淘宝登录域，
+   携程已有 `CTRIP_STORAGE_STATE_B64` 时继续使用。参数应与本地登录浏览器一致。
+
+   ```powershell
+   python -m pip install -r requirements-session.txt
+   python scripts/upload_ctrip_session.py --platform tongcheng --browser-channel msedge
+   python scripts/upload_ctrip_session.py --platform fliggy --browser-channel msedge
+   ```
+
+2. 推送代码到 `main`，在 Actions → **Flight Price Monitor** → **Run workflow** 勾选
+   `preview_comparison`。这次验收输出两榜和各平台状态，结果在 `collection-status` 附件的
+   `comparison.json`，不发微信，也不读写定时任务的历史缓存。云端使用无头 Chromium。
+   如果会话缺失或无法解码，报告会标记该平台且跳过其网络查询，其他平台继续执行。
+   `ranked_ticket` 是原始票价，`ranked_verified` 是经两程托运硬条件筛选的报价。
+   本地查询通过不能证明平台认可 Linux 上恢复的会话，需要核对每家状态和报价。
+
+3. 验收后，在仓库 Settings → Secrets and variables → Actions → Variables 添加
+   `FLIGHT_MONITOR_COMPARISON_ENABLED=true`，并保持 `FLIGHT_MONITOR_ENABLED=true`。
+   下一次定时任务会发一条三平台合并推送。移除联合开关即可回到原有携程定时路径。
+   云端正式运行后可停掉本地定时，避免重复推送。
 
 ## 同程单平台验收
 

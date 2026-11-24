@@ -12,7 +12,7 @@ routes:
 platforms: [ctrip]
 comparison:
   # Shared by scripts/compare_round_trip.py and main.py --compare.
-  platforms: [ctrip, tongcheng]
+  platforms: [ctrip, tongcheng, fliggy]
   times: ["00:25", "08:25", "13:25", "19:25"]
   crawler:
     headless: false

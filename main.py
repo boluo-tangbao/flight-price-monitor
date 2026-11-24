@@ -6,6 +6,7 @@
     python main.py -c other.yaml  # 指定配置文件
 """
 import argparse
+import json
 import sys
 import os
 from pathlib import Path
@@ -19,7 +20,8 @@ from core.alerter import Alerter
 from core.scheduler import run_scheduler
 from core.notifier import build_notifier
 from crawlers import REGISTRY
-from core.collection import collect, FetchFailure
+from core.collection import collect, FetchFailure, FetchResult
+from core.cloud_session import decode_state, detach_cloud_states
 from core.health import HealthMonitor
 from core.round_trip_comparison import compare_round_trips, comparison_settings, validate_comparison_route
 from datetime import date as Date
@@ -58,13 +60,18 @@ def build_routes(cfg: dict):
     return routes
 
 
-def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comparison=False):
+def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comparison=False, cloud=False):
     crawler_cfg = cfg.get("crawler", {})
     platforms = cfg.get("platforms", ["ctrip", "fliggy", "tongcheng"])
     routes = build_routes(cfg)
     if comparison:
         validate_comparison_route(routes)
         platforms, crawler_cfg = comparison_settings(cfg, REGISTRY)
+    cloud_state = detach_cloud_states() if cloud else {}
+    cloud_errors = {}
+    if cloud:
+        crawler_cfg.update(headless=True, pc_browser_channel="chromium",
+                           tongcheng_pc_browser_channel="chromium", fliggy_pc_browser_channel="chromium")
     health = HealthMonitor(storage, None if comparison else alerter.notifier, cfg.get("health"))
 
     crawlers = []
@@ -73,7 +80,17 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comp
         if cls is None:
             logger.warning("未知平台: %s，已跳过", name)
             continue
-        crawlers.append(cls(crawler_cfg, logger))
+        crawler = cls(crawler_cfg, logger)
+        if cloud:
+            encoded = cloud_state.pop(name, "")
+            if not encoded:
+                cloud_errors[name] = "cloud_session_missing_no_request"
+            else:
+                try:
+                    crawler.cloud_storage_state = decode_state(encoded, platform=name)
+                except FetchFailure:
+                    cloud_errors[name] = "cloud_session_invalid_or_expired_no_request"
+        crawlers.append(crawler)
 
     def job():
         logger.info("===== 开始一轮抓取 =====")
@@ -83,11 +100,16 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comp
             for c in crawlers:
                 for date in route.dates:
                     for ret in (route.return_dates or [""]):
-                        result = collect(c, route.from_code, route.to_code, str(date), ret)
-                        health.record(c.name, route, str(date), ret, result, c.last_elapsed_ms)
+                        if c.name in cloud_errors:
+                            result = FetchResult("login_required", evidence=cloud_errors[c.name])
+                            elapsed_ms = 0
+                        else:
+                            result = collect(c, route.from_code, route.to_code, str(date), ret)
+                            elapsed_ms = c.last_elapsed_ms
+                        health.record(c.name, route, str(date), ret, result, elapsed_ms)
                         logger.info("[采集状态] %s %s->%s %s 返=%s %s (%dms)",
                                     c.name, route.from_code, route.to_code, date, ret,
-                                    result.status, c.last_elapsed_ms)
+                                    result.status, elapsed_ms)
                         if ret:
                             for quote in result.prices:
                                 health.save_round_trip(quote)
@@ -103,6 +125,9 @@ def make_job(cfg: dict, logger, storage: PriceStorage, alerter: Alerter, *, comp
                             all_prices.extend(result.prices)
             if comparison:
                 report = compare_round_trips(route, route.dates[0], route.return_dates[0], round_results)
+                if cloud:
+                    out = Path(cfg.get("output", {}).get("db_path", "data/prices.db")).with_name("comparison.json")
+                    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
                 alerter.report_joint_round_trip(route, report)
             else:
                 alerter.check_and_alert(route, all_prices)
@@ -117,11 +142,14 @@ def main():
     ap.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
     ap.add_argument("--once", action="store_true", help="只运行一次后退出")
     ap.add_argument("--compare", action="store_true", help="按 comparison 配置做多平台联合监控")
+    ap.add_argument("--cloud", action="store_true", help="从 Actions Secrets 加载三平台会话并导出联合结果")
     ap.add_argument("--browser-channel", choices=["chromium", "chrome", "msedge"],
                     help="携程电脑版使用的浏览器；登录和采集使用相同选项")
     ap.add_argument("--login", metavar="PLATFORM",
                     help="登录指定平台(ctrip-pc=携程电脑版；ctrip=手机版)，完成后回车保存会话")
     args = ap.parse_args()
+    if args.cloud and (not args.compare or not args.once or args.login):
+        ap.error("--cloud requires --compare --once and cannot be used with --login")
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -132,9 +160,10 @@ def main():
         cfg.setdefault("crawler", {})["pc_browser_channel"] = args.browser_channel
         if args.compare:
             cfg.setdefault("comparison", {}).setdefault("crawler", {})["pc_browser_channel"] = args.browser_channel
-    if os.environ.get("SERVERCHAN_SEND_KEY"):
+    send_key = os.environ.pop("SERVERCHAN_SEND_KEY", "")
+    if send_key:
         sc = cfg.setdefault("notifier", {}).setdefault("serverchan", {})
-        sc.update(enabled=True, send_key=os.environ["SERVERCHAN_SEND_KEY"])
+        sc.update(enabled=True, send_key=send_key)
 
     out = cfg.get("output", {})
     logger = setup_logger(out.get("log_path", "logs/monitor.log"))
@@ -172,7 +201,7 @@ def main():
     )
 
     try:
-        job = make_job(cfg, logger, storage, alerter, comparison=args.compare)
+        job = make_job(cfg, logger, storage, alerter, comparison=args.compare, cloud=args.cloud)
     except ValueError as error:
         ap.error(str(error))
 

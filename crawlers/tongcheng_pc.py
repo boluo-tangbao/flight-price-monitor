@@ -16,6 +16,9 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
 
     def __init__(self, crawler, diagnostics=None):
         config = dict(crawler.config)
+        self.cloud_storage_state = getattr(crawler, "cloud_storage_state", None)
+        if self.cloud_storage_state is not None:
+            config["slider"] = {"auto": False}
         config["user_data_dir"] = str(Path(crawler.user_data_root).resolve())
         channel = config.get("tongcheng_pc_browser_channel")
         if channel:
@@ -23,7 +26,9 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
         super().__init__(config, crawler.logger)
         self.diagnostics = diagnostics if diagnostics is not None else {}
         self.last_outcome = None
-        self.probe_mode = True
+        self.probe_mode = self.cloud_storage_state is None
+        if self.cloud_storage_state is not None:
+            return
         handler = ensure_slider_handler(config, user_data_dir=self.user_data_root,
                                         profile=self.profile_name, logger=self.logger)
         if handler is None and config.get("slider", {}).get("auto") is not False:
@@ -37,7 +42,14 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             handler.logger = self.logger
 
     def new_page(self, ctx):
-        page = super().new_page(ctx)
+        if self.cloud_storage_state is None:
+            page = super().new_page(ctx)
+        else:
+            page = ctx.new_page()
+            page.set_default_timeout(self.timeout_ms)
+            page.set_default_navigation_timeout(self.timeout_ms)
+            self._last_page = page
+            self._watch_retry_after(page)
         def count_search(request):
             target = urlsplit(request.url)
             if (request.resource_type == "document" and target.hostname == "www.ly.com"
@@ -48,7 +60,12 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
 
     @contextmanager
     def browser(self, *args, **kwargs):
-        with super().browser(*args, **kwargs) as ctx:
+        if self.cloud_storage_state is None:
+            desktop = super().browser(*args, **kwargs)
+        else:
+            from core.cloud_session import cloud_desktop
+            desktop = cloud_desktop(self.cloud_storage_state, {"width": 1366, "height": 900})
+        with desktop as ctx:
             yield ctx
             reader = getattr(self, 'detail_reader', None)
             if reader is not None and self.last_outcome in ('ok', 'error') and self._last_page is not None:

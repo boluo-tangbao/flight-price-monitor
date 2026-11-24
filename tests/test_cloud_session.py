@@ -4,7 +4,8 @@ import logging
 import os
 import unittest
 from unittest.mock import patch
-from core.cloud_session import encode_state, decode_state, consume_cloud_state, minimal_state, SECRET_NAME
+from core.cloud_session import (encode_state, decode_state, consume_cloud_state, minimal_state,
+                               SECRET_NAME, SESSION_SECRETS, detach_cloud_states)
 from core.collection import FetchFailure
 from crawlers.ctrip import CtripCrawler
 
@@ -17,6 +18,24 @@ def sample():
 
 
 class CloudSessionTests(unittest.TestCase):
+    def test_additional_platform_states_cannot_cross_platforms(self):
+        cookies = [{"domain": ".ly.com", "name": "tc"},
+                   {"domain": ".fliggy.com", "name": "fg"},
+                   {"domain": ".taobao.com", "name": "fg-login"},
+                   {"domain": "fliggy.com.unrelated.test", "name": "other"}]
+        state = {"cookies": cookies, "origins": []}
+        for platform, names in (("tongcheng", ["tc"]), ("fliggy", ["fg", "fg-login"])):
+            encoded = encode_state(state, now=1000, platform=platform)
+            restored = decode_state(encoded, now=1001, platform=platform)
+            self.assertEqual([cookie["name"] for cookie in restored["cookies"]], names)
+            with self.assertRaises(FetchFailure):
+                decode_state(encoded, now=1001, platform="ctrip")
+
+    def test_all_platform_secrets_are_removed_from_process_environment(self):
+        with patch.dict(os.environ, {secret: platform for platform, secret in SESSION_SECRETS.items()}):
+            self.assertEqual(detach_cloud_states(), {platform: platform for platform in SESSION_SECRETS})
+            self.assertTrue(all(secret not in os.environ for secret in SESSION_SECRETS.values()))
+
     def test_only_ctrip_state_exported(self):
         filtered = minimal_state(sample())
         self.assertEqual(len(filtered["cookies"]), 1)

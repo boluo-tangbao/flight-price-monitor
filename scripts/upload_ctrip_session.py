@@ -14,7 +14,7 @@ import re
 import subprocess
 import urllib.request
 import urllib.error
-from core.cloud_session import encode_state, SECRET_NAME
+from core.cloud_session import encode_state, minimal_state, SESSION_SECRETS
 
 
 class UploadError(Exception):
@@ -74,9 +74,11 @@ def prepare_environment(token, repo, environment):
     return root, key
 
 
-def read_local_state(project, channel):
+def read_local_state(project, channel, *, platform="ctrip"):
     from playwright.sync_api import sync_playwright
-    profile = project / "user_data" / ("ctrip" if channel == "chromium" else "ctrip-" + channel)
+    profile_name = (("ctrip" if channel == "chromium" else "ctrip-" + channel)
+                    if platform == "ctrip" else platform + "-pc")
+    profile = project / "user_data" / profile_name
     if not profile.is_dir():
         raise UploadError("Saved login profile not found for the requested channel")
     with sync_playwright() as p:
@@ -85,13 +87,27 @@ def read_local_state(project, channel):
         if channel != "chromium": options["channel"] = channel
         context = p.chromium.launch_persistent_context(str(profile), **options)
         try:
-            return context.storage_state(indexed_db=True)
+            state = context.storage_state(indexed_db=True)
+            snapshot = profile / "session-state.json"
+            if platform == "tongcheng" and snapshot.is_file():
+                # Reuse the local adapter's restore precedence, in memory only.
+                from crawlers.tongcheng_upstream.browser import BaseCrawler
+                try:
+                    saved = minimal_state(json.loads(snapshot.read_text(encoding="utf-8")),
+                                          platform=platform)["cookies"]
+                except ValueError:
+                    saved = []
+                replacements = BaseCrawler._restore_plan(state["cookies"], saved)
+                cookies = {BaseCrawler._cookie_key(item): item for item in state["cookies"] + replacements}
+                state["cookies"] = list(cookies.values())
+            return state
         finally:
             context.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Securely upload existing Ctrip login state; no site navigation")
+    parser = argparse.ArgumentParser(description="Securely upload one platform's existing login state")
+    parser.add_argument("--platform", choices=SESSION_SECRETS, default="ctrip")
     parser.add_argument("--repo", default="boluo-tangbao/flight-price-monitor")
     parser.add_argument("--environment", default="ctrip-cloud")
     parser.add_argument("--browser-channel", choices=["msedge", "chrome", "chromium"], default="msedge")
@@ -108,18 +124,19 @@ def main():
         project = Path(__file__).resolve().parents[1]
         token = github_token(project)
         root, key = prepare_environment(token, args.repo, args.environment)
-        state = read_local_state(project, args.browser_channel)
-        encoded = encode_state(state, ttl_days=args.ttl_days)
+        secret = SESSION_SECRETS[args.platform]
+        state = read_local_state(project, args.browser_channel, platform=args.platform)
+        encoded = encode_state(state, ttl_days=args.ttl_days, platform=args.platform)
         encrypted = SealedBox(PublicKey(key["key"], Base64Encoder)).encrypt(encoded.encode("ascii"))
-        api(token, "PUT", root + "/secrets/" + SECRET_NAME,
+        api(token, "PUT", root + "/secrets/" + secret,
             {"encrypted_value": base64.b64encode(encrypted).decode("ascii"), "key_id": key["key_id"]})
-        info = api(token, "GET", root + "/secrets/" + SECRET_NAME)
-        if not info or info.get("name") != SECRET_NAME:
+        info = api(token, "GET", root + "/secrets/" + secret)
+        if not info or info.get("name") != secret:
             raise UploadError("Upload response could not be confirmed")
-        print(f"Uploaded {SECRET_NAME} to {args.repo} / {args.environment}; main branch only.")
-        print("Only Ctrip state was included; no plaintext state file was written.")
+        print(f"Uploaded {secret} to {args.repo} / {args.environment}; main branch only.")
+        print(f"Only {args.platform} state was included; no plaintext state file was written.")
         print(f"Optional package expiry: {args.ttl_days} days." if args.ttl_days is not None else
-              "No fixed package expiry. Update when Ctrip requires login again.")
+              "No fixed package expiry. Update when the platform requires login again.")
         return 0
     except ImportError:
         print("Install local helper dependency: python -m pip install -r requirements-session.txt", file=sys.stderr)

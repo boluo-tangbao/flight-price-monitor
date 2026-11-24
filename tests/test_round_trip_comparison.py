@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -7,6 +8,7 @@ from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from core.collection import FetchResult
+from core.cloud_session import SESSION_SECRETS, encode_state
 from core.alerter import Alerter
 from core.models import Route, RoundTripQuote
 from core.storage import PriceStorage
@@ -15,6 +17,44 @@ from scripts.compare_round_trip import main as comparison_main, run_comparison
 
 
 class ComparisonTest(unittest.TestCase):
+    def test_cloud_round_skips_missing_session_and_still_exports_other_platforms(self):
+        cfg = load_config(str(Path(__file__).resolve().parents[1] / "config.monitor.yaml"))
+        calls = []
+
+        class Crawler:
+            def __init__(self, config, logger):
+                self.config, self.logger = config, logger
+
+            def fetch_round_trip(self, origin, destination, depart, back):
+                calls.append(self.name)
+                self_test.assertTrue(self.config["headless"])
+                self_test.assertEqual(self.config[f"{self.name}_pc_browser_channel"]
+                                      if self.name != "ctrip" else self.config["pc_browser_channel"], "chromium")
+                self_test.assertTrue(all(secret not in os.environ for secret in SESSION_SECRETS.values()))
+                self_test.assertEqual(self.cloud_storage_state["cookies"][0]["name"], self.name)
+                return [RoundTripQuote(self.name, origin, destination, depart, 2800,
+                                       flight_no="NH976", return_date=back, return_flight_no="NH975")]
+
+        self_test = self
+        providers = cfg["comparison"]["platforms"]
+        self.assertEqual(providers, ["ctrip", "tongcheng", "fliggy"])
+        registry = {name: type(name, (Crawler,), {"name": name}) for name in providers}
+        env = {secret: "" for secret in SESSION_SECRETS.values()}
+        for name, domain in (("ctrip", "ctrip.com"), ("fliggy", "fliggy.com")):
+            env[SESSION_SECRETS[name]] = encode_state(
+                {"cookies": [{"name": name, "domain": domain, "value": "synthetic-secret"}]}, platform=name)
+        logger = logging.getLogger("cloud-comparison-test")
+        with TemporaryDirectory() as temp, patch("main.REGISTRY", registry), patch.dict(os.environ, env):
+            cfg["output"]["db_path"] = str(Path(temp) / "prices.db")
+            storage = PriceStorage(cfg["output"]["db_path"])
+            make_job(cfg, logger, storage, Alerter(logger, storage=storage), comparison=True, cloud=True)()
+            raw = (Path(temp) / "comparison.json").read_text(encoding="utf-8")
+        report = json.loads(raw)
+        self.assertEqual(calls, ["ctrip", "fliggy"])
+        self.assertEqual(report["platforms"]["tongcheng"]["status"], "login_required")
+        self.assertEqual(len(report["ranked_ticket"]), 2)
+        self.assertNotIn("synthetic-secret", raw)
+
     def test_command_lists_ticket_prices_when_no_baggage_total_is_verified(self):
         cfg = load_config(str(Path(__file__).resolve().parents[1] / "config.monitor.yaml"))
         for args in ([], ["--diagnostics"]):

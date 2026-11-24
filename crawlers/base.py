@@ -87,7 +87,9 @@ class BaseCrawler:
                 if channel != "chromium":
                     options["channel"] = channel
             from core.cloud_session import consume_cloud_state
-            state = consume_cloud_state() if native_pc else None
+            state = getattr(self, "cloud_storage_state", None) if native_pc else None
+            if native_pc and state is None:
+                state = consume_cloud_state()
             cloud_browser = None
             if state is not None:
                 mode = self.config.get("cloud_pc_browser_mode", "upstream")

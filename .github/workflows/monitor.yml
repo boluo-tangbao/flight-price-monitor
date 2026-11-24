@@ -5,7 +5,12 @@ on:
   schedule:
     - cron: '25 8,13,19,0 * * *'
       timezone: 'Asia/Shanghai'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      preview_comparison:
+        description: 'Test three-platform comparison once without WeChat or production history'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,16 +24,17 @@ jobs:
     environment: ctrip-cloud
     if: github.event_name == 'workflow_dispatch' || vars.FLIGHT_MONITOR_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 16
     env:
       TZ: Asia/Shanghai
     steps:
-      - name: Require completed cloud and baggage acceptance
+      - name: Require monitoring enabled unless running a preview
         env:
           ENABLED: ${{ vars.FLIGHT_MONITOR_ENABLED }}
+          PREVIEW: ${{ inputs.preview_comparison == true }}
         run: |
-          if [ "$ENABLED" != "true" ]; then
-            echo "Cloud and two-leg baggage verification pending; no airline request sent."
+          if [ "$ENABLED" != "true" ] && [ "$PREVIEW" != "true" ]; then
+            echo "Scheduled monitoring disabled; no airline request sent."
             exit 1
           fi
       - uses: actions/checkout@v4
@@ -36,25 +42,34 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-tongcheng-pc.txt
       - run: python -m playwright install chromium --with-deps
       - uses: actions/cache/restore@v4
+        if: ${{ inputs.preview_comparison != true }}
         with:
           path: data/prices.db
           key: flight-db-v2-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: flight-db-v2-${{ github.ref_name }}-
       - name: Query configured Shanghai Osaka round trip once
         env:
+          COMPARISON: ${{ inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true' }}
           CTRIP_STORAGE_STATE_B64: ${{ secrets.CTRIP_STORAGE_STATE_B64 }}
-          SERVERCHAN_SEND_KEY: ${{ secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY }}
-        run: python main.py -c config.monitor.yaml --once
-        timeout-minutes: 3
+          TONGCHENG_STORAGE_STATE_B64: ${{ (inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true') && secrets.TONGCHENG_STORAGE_STATE_B64 || '' }}
+          FLIGGY_STORAGE_STATE_B64: ${{ (inputs.preview_comparison == true || vars.FLIGHT_MONITOR_COMPARISON_ENABLED == 'true') && secrets.FLIGGY_STORAGE_STATE_B64 || '' }}
+          SERVERCHAN_SEND_KEY: ${{ inputs.preview_comparison != true && (secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY) || '' }}
+        run: |
+          if [ "$COMPARISON" = "true" ]; then
+            python main.py -c config.monitor.yaml --once --compare --cloud
+          else
+            python main.py -c config.monitor.yaml --once
+          fi
+        timeout-minutes: 10
       - name: Export status
         if: always()
         run: |
           if [ -f data/prices.db ]; then python scripts/collection_status.py; fi
       - uses: actions/cache/save@v4
-        if: always()
+        if: ${{ always() && inputs.preview_comparison != true }}
         with:
           path: data/prices.db
           key: flight-db-v2-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -62,4 +77,6 @@ jobs:
         if: always()
         with:
           name: collection-status
-          path: data/collection-status.json
+          path: |
+            data/collection-status.json
+            data/comparison.json

@@ -157,6 +157,12 @@ def _desktop_browser(crawler, *, headless):
     profile = Path(crawler.user_data_root) / "fliggy-pc"
     options = {"channel": channel} if channel != "chromium" else {}
     try:
+        state = getattr(crawler, "cloud_storage_state", None)
+        if state is not None:
+            from core.cloud_session import cloud_desktop
+            with cloud_desktop(state, {"width": 1440, "height": 950}) as context:
+                yield context
+            return
         with sync_playwright() as pw:
             with pw.chromium.launch_persistent_context(
                     str(profile), locale="zh-CN", headless=headless,
