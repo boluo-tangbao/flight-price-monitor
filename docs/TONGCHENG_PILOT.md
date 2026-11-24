@@ -49,8 +49,11 @@ python main.py -c config.monitor.yaml --compare
    这次只读同程，会在 `comparison.json` 的 `platforms.tongcheng.diagnostics` 记录浏览器内是否有
    同程已知的登录 Cookie（只有存在性，不代表服务器接受登录）、导航状态码、页面归类、行程参数状态及报价响应计数。
    第三方地址和未识别路径只记录类别。报告不含页面正文、原始查询参数或 Cookie 值。
-   同程云端沿用原版桌面浏览器的初始化、页面超时和关闭流程，使用 Playwright 的完整 Chromium
-   无头通道。通过 Secret 在临时会话里恢复登录态，不读取或保存本地浏览器档案，不自动处理验证。
+   同程单平台预览使用 `launch_persistent_context` 打开临时 Chromium 专用档案。在访问同程前读取
+   现有的 `TONGCHENG_STORAGE_STATE_B64`，恢复同程站点存储，并沿用原版规则补回有效的 Cookie。
+   `comparison.json` 中的 `browser_mode=upstream_persistent_chromium` 确认本次使用了这个档案入口。
+   浏览器关闭后删除临时档案，档案和登录数据都不进入附件或缓存。全平台预览和定时任务继续使用
+   现有的临时会话模式，待单次验收取得往返组合及含税总价后再切换。同程要求验证时记录状态。
    往返取价与托运仍走本项目的校验。如果报价接口只返回 HTTP 406，直接报告 `tongcheng_list_http_406`，
    不继续进详情，也不把接口拒绝报成无票。
 

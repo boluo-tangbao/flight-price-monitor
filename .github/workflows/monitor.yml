@@ -65,7 +65,7 @@ jobs:
           SERVERCHAN_SEND_KEY: ${{ inputs.preview_comparison != true && (secrets.SERVERCHAN_SEND_KEY || secrets.SERVERCHAN_KEY) || '' }}
         run: |
           if [ "$TONGCHENG_ONLY" = "true" ]; then
-            python main.py -c config.monitor.yaml --once --compare --cloud --cloud-platform tongcheng
+            TONGCHENG_PERSISTENT_PROFILE=true python main.py -c config.monitor.yaml --once --compare --cloud --cloud-platform tongcheng
           elif [ "$COMPARISON" = "true" ]; then
             python main.py -c config.monitor.yaml --once --compare --cloud
           else

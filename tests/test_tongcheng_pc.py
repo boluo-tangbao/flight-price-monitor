@@ -2,11 +2,12 @@
 from contextlib import nullcontext
 import json
 import logging
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from core.collection import FetchFailure
 from crawlers.tongcheng_pc import TongchengDesktop
@@ -110,6 +111,45 @@ class UpstreamTests(unittest.TestCase):
         self.assertEqual(report["final_destination"], {"host": "passport.ly.com", "path": "login_related",
                          "search_parameter": "missing", "same_search_location": False})
         self.assertNotIn("hidden-", json.dumps(report))
+
+    def test_actions_persistent_profile_restores_state_and_is_deleted(self):
+        cookie = {"name": "memberIdNew", "domain": ".ly.com", "path": "/", "value": "test", "expires": -1}
+        expired = dict(cookie, name="expired", expires=1)
+        origins = [{"origin": "https://www.ly.com", "localStorage": [{"name": "sample", "value": "test"}]}]
+        self.crawler.cloud_storage_state = {"cookies": [cookie, expired], "origins": origins}
+        ctx = Mock()
+        ctx.cookies.return_value = []
+
+        with patch.dict(os.environ, {"TONGCHENG_PERSISTENT_PROFILE": "true"}), \
+                patch.object(browser, "sync_playwright") as pw:
+            worker = TongchengDesktop(self.crawler)
+            worker.expected_search_url = worker._intl_rt_url(*TRIP)
+            engine = pw.return_value.__enter__.return_value.chromium
+            engine.launch_persistent_context.return_value = ctx
+            with worker.browser(save_session="login"):
+                options = engine.launch_persistent_context.call_args.kwargs
+                profile = Path(options["user_data_dir"])
+                self.assertTrue(profile.is_dir())
+                self.assertNotEqual(profile, Path(self.root.name) / "tongcheng-pc")
+                self.assertEqual(options["channel"], "chromium")
+                self.assertEqual(ctx.method_calls[:3], [
+                    call.set_storage_state({"cookies": [], "origins": origins}),
+                    call.cookies(), call.add_cookies([cookie]),
+                ])
+            engine.launch.assert_not_called()
+            ctx.close.assert_called_once()
+            ctx.storage_state.assert_not_called()
+            self.assertFalse(profile.exists())
+            self.assertEqual(worker.diagnostics["browser_mode"], "upstream_persistent_chromium")
+
+            ctx.reset_mock()
+            ctx.set_storage_state.side_effect = ValueError("private browser diagnostics")
+            with self.assertRaisesRegex(FetchFailure, "^tongcheng_cloud_profile_restore_failed$"):
+                with worker.browser():
+                    self.fail("Query must not start after failed restore")
+            failed_profile = Path(engine.launch_persistent_context.call_args.kwargs["user_data_dir"])
+            self.assertFalse(failed_profile.exists())
+            ctx.close.assert_called_once()
 
     def run_page(self, page):
         ctx = Mock()

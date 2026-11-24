@@ -1,11 +1,15 @@
 """Isolated adapter for the pinned upstream Tongcheng desktop workflow."""
+import os
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from contextlib import contextmanager
 
 from playwright.sync_api import Error as BrowserError
 
-from .tongcheng_upstream.browser import BaseCrawler
+from core.collection import FetchFailure
+
+from .tongcheng_upstream.browser import BaseCrawler, _dedupe_cookies
 from .tongcheng_upstream.roundtrip import InternationalRoundTrip
 from .tongcheng_upstream.challenge import ensure_slider_handler
 
@@ -19,6 +23,9 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
     def __init__(self, crawler, diagnostics=None):
         config = dict(crawler.config)
         self.cloud_storage_state = getattr(crawler, "cloud_storage_state", None)
+        self.cloud_persistent_profile = (
+            self.cloud_storage_state is not None and os.environ.get("TONGCHENG_PERSISTENT_PROFILE") == "true"
+        )
         config["user_data_dir"] = str(Path(crawler.user_data_root).resolve())
         channel = config.get("tongcheng_pc_browser_channel")
         if self.cloud_storage_state is not None:
@@ -43,6 +50,21 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             handler.profile = self.profile_name
             handler.logger = self.logger
 
+    def _restore_cloud_profile(self, ctx):
+        try:
+            state = self.cloud_storage_state
+            if state["origins"]:
+                # Apply site storage before merging cookies into the empty profile.
+                ctx.set_storage_state({"cookies": [], "origins": state["origins"]})
+            now = time.time()
+            saved = [cookie for cookie in state["cookies"]
+                     if cookie.get("expires", -1) == -1 or cookie["expires"] > now]
+            plan = self._restore_plan(ctx.cookies(), saved, now=now)
+            if plan:
+                ctx.add_cookies(_dedupe_cookies(plan))
+        except Exception:
+            raise FetchFailure("error", "tongcheng_cloud_profile_restore_failed") from None
+
     def new_page(self, ctx):
         page = super().new_page(ctx)
         def count_search(request):
@@ -59,7 +81,10 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             expected = getattr(self, "expected_search_url", None)
             inspect_cloud = self.cloud_storage_state is not None and expected is not None
             if inspect_cloud:
-                self.diagnostics["browser_mode"] = "upstream_lifecycle_chromium"
+                self.diagnostics["browser_mode"] = (
+                    "upstream_persistent_chromium" if self.cloud_persistent_profile
+                    else "upstream_lifecycle_chromium"
+                )
                 # Existence only. It does not prove that the service accepts the session.
                 try:
                     self.diagnostics["auth_cookie_in_search_context"] = any(

@@ -37,7 +37,8 @@
     "omit unrelated schedulers, notifications, policy, scene dumps",
     "restrict city helper to SHA/OSA",
     "use a single strict list collector for polling and live fare detail candidates",
-    "reuse the desktop browser lifecycle for cloud sessions with the native Chromium channel, in-memory state, and no profile snapshot or automatic challenge processing"
+    "reuse the desktop browser lifecycle for cloud sessions with the native Chromium channel, in-memory state, and no profile snapshot or automatic challenge processing",
+    "allow a single-platform preview to hydrate an isolated temporary persistent Chromium profile from the existing site-scoped cloud session"
   ],
   "upstream_sha256": {
     "core/degraded.py": "29a5368c70715f09a585e7c2e87d2fd368f9ffb405035c937af8717a94c7d5ac",

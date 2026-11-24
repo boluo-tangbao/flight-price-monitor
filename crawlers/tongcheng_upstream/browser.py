@@ -921,6 +921,7 @@ class BaseCrawler:
         hl = self.headless if headless is None else headless
         fp = self.fingerprint()
         cloud_state = getattr(self, "cloud_storage_state", None)
+        cloud_profile = cloud_state is not None and getattr(self, "cloud_persistent_profile", False)
         if cloud_state is not None:
             save_session = None
         with sync_playwright() as p, ExitStack() as browser_cleanup:
@@ -952,7 +953,14 @@ class BaseCrawler:
             _chan = stealth_ext.channel(self.config)
             if _chan:
                 _kw["channel"] = _chan
-            if cloud_state is not None:
+            if cloud_profile:
+                profile = browser_cleanup.enter_context(tempfile.TemporaryDirectory(prefix="tongcheng-actions-"))
+                ctx = p.chromium.launch_persistent_context(
+                    user_data_dir=profile, headless=hl, viewport=fp["viewport"], locale=fp["locale"],
+                    timezone_id=fp["timezone"], is_mobile=fp["is_mobile"], has_touch=fp["has_touch"],
+                    **_kw,
+                )
+            elif cloud_state is not None:
                 # The hosted runner can share the desktop lifecycle without
                 # importing a persistent profile or saving account data to disk.
                 browser = p.chromium.launch(headless=hl, **_kw)
@@ -1006,6 +1014,8 @@ class BaseCrawler:
                         pass
             state = None
             try:
+                if cloud_profile:
+                    self._restore_cloud_profile(ctx)
                 # Chromium 重开可能丢弃 expires=-1 的会话 Cookie；快照
                 # 只补缺失/更旧的键，不覆盖档案里更新的持久 Cookie。
                 if cloud_state is None and os.path.isfile(self.session_state_path):
