@@ -12,6 +12,11 @@ PLATFORM_NAMES = {"ctrip": "携程", "tongcheng": "同程", "fliggy": "飞猪",
 COLLECTION_STATUS = {"ok": "已返回报价", "empty": "明确无票", "timeout": "采集超时",
                      "login_required": "需登录", "blocked": "查询受阻",
                      "parse_error": "详情未核实", "unsupported": "暂不支持"}
+TICKET_PRICE_LABELS = {"product_round_trip_tax": "列表往返起价",
+                       "tongcheng_listed_round_trip_tax": "列表往返含税价",
+                       "fliggy_calendar_round_trip_tax": "日历往返价（参考）",
+                       "selected_round_trip_tax": "往返含税票价",
+                       "fliggy_selected_round_trip_tax": "往返含税票价"}
 
 
 def _checked_baggage_line(quote):
@@ -55,6 +60,19 @@ class Alerter:
             legs = row["checked_baggage"]
             view = f" · [查看报价]({row['source_url']})" if row["source_url"] else ""
             lines.append(f"- 第 {rank} 名 · {platform} · {outbound} / {inbound} · ¥{total:,.2f}"
+                         f" · 去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}{view}")
+
+        lines.extend(["", "**原始票价 · 按平台报出的往返票价排序**"])
+        ticket_prices = report["ranked_ticket"]
+        if not ticket_prices:
+            lines.append("本轮暂无原始票价。")
+        for row in ticket_prices[:5]:
+            platform = PLATFORM_NAMES.get(row["platform"], row["platform"])
+            flights = " / ".join(flight for flight in (row["flight_no"], row["return_flight_no"]) if flight)
+            label = TICKET_PRICE_LABELS.get(row["price_basis"], "平台往返票价")
+            legs = row["checked_baggage"]
+            view = f" · [查看报价]({row['source_url']})" if row["source_url"] else ""
+            lines.append(f"- {platform} · {flights or '航班待确认'} · {label} ¥{row['ticket_price_cny']:,.2f}"
                          f" · 去程托运 {legs['outbound']} / 回程托运 {legs['inbound']}{view}")
 
         pending = [row for row in report["pending_baggage"]

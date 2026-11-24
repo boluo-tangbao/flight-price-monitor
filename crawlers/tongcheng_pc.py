@@ -14,7 +14,7 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
     use_mobile = False
     AUTH_COOKIES = ("memberIdNew", "cnUser")
 
-    def __init__(self, crawler, diagnostics=None, capture=None):
+    def __init__(self, crawler, diagnostics=None):
         config = dict(crawler.config)
         config["user_data_dir"] = str(Path(crawler.user_data_root).resolve())
         channel = config.get("tongcheng_pc_browser_channel")
@@ -22,7 +22,6 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             config["browser_channel"] = channel
         super().__init__(config, crawler.logger)
         self.diagnostics = diagnostics if diagnostics is not None else {}
-        self.capture = capture
         self.last_outcome = None
         self.probe_mode = True
         handler = ensure_slider_handler(config, user_data_dir=self.user_data_root,
@@ -39,8 +38,6 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
 
     def new_page(self, ctx):
         page = super().new_page(ctx)
-        if self.capture is not None:
-            page.on("response", self.capture)
         def count_search(request):
             target = urlsplit(request.url)
             if (request.resource_type == "document" and target.hostname == "www.ly.com"

@@ -101,9 +101,10 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
     }
     quotes = {}
     api_status = None
+    list_done = False
 
     def capture(response):
-        nonlocal api_status
+        nonlocal api_status, list_done
         endpoint = urlsplit(response.url)
         if not endpoint.path.rstrip("/").endswith("/miflightapi/ts/list"):
             return
@@ -134,7 +135,10 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
                 api_status = safe_code
                 return
         data = payload.get("data") if isinstance(payload, dict) else None
-        rows = data.get("res") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return
+        list_done = list_done or data.get("done") == 1
+        rows = data.get("res")
         if isinstance(rows, list):
             diagnostics["offer_rows_seen"] += len(rows)
         parsed = payload_quotes(payload, origin, destination, depart, back, url)
@@ -144,7 +148,10 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
             if key not in quotes or quote.price < quotes[key].price:
                 quotes[key] = quote
 
-    worker = TongchengDesktop(crawler, diagnostics, capture)
+    def list_progress():
+        return len(quotes), list_done
+
+    worker = TongchengDesktop(crawler, diagnostics)
     if crawler.config.get('tongcheng_round_trip_fare_details') is True:
         from .tongcheng_fare_details import read_fare_inventory
         def detail_reader(page):
@@ -175,7 +182,7 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
     try:
         # Execute the upstream international RT branch, including its desktop
         # browser, navigation challenge handler and response completion loop.
-        worker._fetch_intl_rt(origin, destination, [depart], back)
+        worker._fetch_intl_rt(origin, destination, depart, back, capture=capture, list_progress=list_progress)
     finally:
         crawler.round_trip_searches = diagnostics["search_document_requests"]
     if api_status in (401, 403, 429):

@@ -31,9 +31,12 @@ class Page:
         for fn in self.events.get("request", []):
             fn(SimpleNamespace(url=url, resource_type="document"))
         for response in self.responses:
-            for fn in self.events.get("response", []):
-                fn(response)
+            self.emit_response(response)
         return SimpleNamespace(status=200)
+
+    def emit_response(self, response):
+        for fn in self.events.get("response", []):
+            fn(response)
 
     def reload(self):
         self.reloads += 1
@@ -74,18 +77,47 @@ class UpstreamTests(unittest.TestCase):
         ctx = Mock()
         ctx.new_page.return_value = page
         clock = iter(range(0, 1000))
-        with patch.object(TongchengDesktop, "browser", return_value=nullcontext(ctx)), \
+        with patch.object(browser.BaseCrawler, "browser", return_value=nullcontext(ctx)), \
                 patch("crawlers.tongcheng_upstream.roundtrip.time.monotonic", side_effect=lambda: next(clock)):
             return fetch_round_trip(self.crawler, *TRIP)
 
     def test_original_rt_branch_returns_strict_pair_and_counts_request(self):
         from crawlers.tongcheng_upstream.roundtrip import InternationalRoundTrip
         self.assertIs(TongchengDesktop._fetch_intl_rt, InternationalRoundTrip._fetch_intl_rt)
-        rows = self.run_page(Page([response(offer())]))
+        reply = response(offer())
+        rows = self.run_page(Page([reply]))
         self.assertEqual(rows[0].price, 2450)
         self.assertEqual(rows[0].return_flight_no, "NH973")
         self.assertEqual(self.crawler.round_trip_searches, 1)
         self.assertEqual(self.crawler.round_trip_diagnostics["offer_rows_seen"], 1)
+        reply.json.assert_called_once_with()
+        reply.text.assert_not_called()
+
+    def test_detail_expansion_gets_later_rows_from_the_same_collector(self):
+        self.crawler.config.update(tongcheng_round_trip_fare_details=True, tongcheng_keep_list_quotes=True)
+        initial = response(offer())
+        later = response({"data": {"res": [
+            {"lng": "NH976_20270215|NH973_20270222", "tp": 2400},
+            {"lng": "NH976_20270215|MM079_20270222", "tp": 2700},
+        ], "done": 1}})
+        page = Page([initial])
+
+        def inspect(active_page, itinerary, fallback, access, diagnostics, *, preferred_pair, current_quotes):
+            self.assertIs(active_page, page)
+            self.assertEqual([(quote.return_flight_no, quote.price) for quote in fallback], [("NH973", 2450)])
+            page.emit_response(later)
+            self.assertEqual([(quote.return_flight_no, quote.price) for quote in current_quotes()],
+                             [("NH973", 2400), ("MM079", 2700)])
+            return []
+
+        with patch("crawlers.tongcheng_fare_details.read_fare_inventory", side_effect=inspect) as read:
+            rows = self.run_page(page)
+        read.assert_called_once()
+        self.assertEqual([quote.price for quote in rows], [2400, 2700])
+        self.assertEqual(self.crawler.round_trip_diagnostics["matched_offer_rows"], 3)
+        for reply in (initial, later):
+            reply.json.assert_called_once_with()
+            reply.text.assert_not_called()
 
     def test_simple_challenge_reaches_original_solver_and_reload(self):
         page = Page([response(offer())], "请完成拼图验证", '<div class="slide-verify"></div>')

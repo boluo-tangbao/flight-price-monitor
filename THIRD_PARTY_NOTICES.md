@@ -42,12 +42,13 @@ Source: https://github.com/dengmeiluan/ticket-monitoring/blob/5cfa6723f072dffb60
 Tongcheng desktop integration (`crawlers/tongcheng_pc.py` and
 `crawlers/tongcheng_upstream/`) uses the pinned upstream commit above.
 The isolated package retains the original browser/session methods, international
-round-trip query branch, challenge navigation guard, Slider/Solver handlers,
+round-trip navigation and polling, challenge navigation guard, Slider/Solver handlers,
 stealth initialization, Windows OCR and necessary local helpers. See
 `crawlers/tongcheng_upstream/PROVENANCE.json` for source hashes and extracted methods.
 Changes: namespace isolation, SHA/OSA city scope, removal of unrelated production
 scheduling/policy/notification/scene-dump integration, safe response counters, and
-strict final acceptance of matching dates and explicit `tp`. The desktop profile
+strict acceptance of matching dates and explicit `tp` in one shared list collector
+used for initial readiness and live fare details. The desktop profile
 and session snapshot remain local. Solver-triggered reloads are counted as extra
 search document requests; no live query is part of the offline integration.
 

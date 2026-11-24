@@ -48,7 +48,7 @@ def main():
     fliggy_mode.add_argument("--fliggy-login", action="store_true",
                              help="Open the Fliggy desktop profile for manual sign-in")
     parser.add_argument("--diagnostics", action="store_true",
-                        help="Show unverified list prices and detailed fare collection records")
+                        help="Show pending-baggage subsets and detailed fare collection records")
     args = parser.parse_args()
     cfg = load_config(args.config)
     routes = build_routes(cfg)
@@ -87,7 +87,7 @@ def main():
         for status in report.get("platforms", {}).values():
             status.pop("diagnostics", None)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if report["best_verified"] else 2
+    return 0 if report["best_verified"] or report.get("ranked_ticket") else 2
 
 
 if __name__ == "__main__":

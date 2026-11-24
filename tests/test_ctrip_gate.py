@@ -6,6 +6,7 @@ from unittest.mock import patch
 from crawlers.ctrip_roundtrip import check_access, build_url, fetch_round_trip
 from crawlers.ctrip import CtripCrawler
 from core.collection import FetchFailure
+from core.models import RoundTripQuote
 
 
 class GateTests(unittest.TestCase):
@@ -88,8 +89,8 @@ class LocalPage:
 
 
 class WarmupTests(unittest.TestCase):
-    def run_query(self, page, cookie_batches=None, timeout=35):
-        crawler = CtripCrawler({"timeout_seconds": timeout}, logging.getLogger("warmup-test"))
+    def run_query(self, page, cookie_batches=None, timeout=35, config=None):
+        crawler = CtripCrawler({"timeout_seconds": timeout, **(config or {})}, logging.getLogger("warmup-test"))
         self.crawler = crawler
         batches = iter(cookie_batches or [[{"name": "cticket", "value": "synthetic"}]])
         last = []
@@ -117,6 +118,18 @@ class WarmupTests(unittest.TestCase):
         self.assertEqual(self.crawler.round_trip_diagnostics,
                          {"homepage_visits": 1, "search_visits": 1,
                           "warmup_cookie_present": True})
+
+    def test_comparison_keeps_initial_list_price_if_detail_fails(self):
+        page = LocalPage()
+        detail_quote = RoundTripQuote("ctrip", "SHA", "OSA", "2027-02-15", 3100,
+                                      flight_no="MU123", return_date="2027-02-22",
+                                      return_flight_no="MU456", price_basis="selected_round_trip_tax")
+        detail_error = FetchFailure("timeout", "detail_timeout", prices=[detail_quote])
+        with patch("crawlers.ctrip_fare_details.read_details", side_effect=detail_error), \
+                self.assertRaises(FetchFailure) as caught:
+            self.run_query(page, config={"round_trip_fare_details": True, "ctrip_keep_list_quotes": True})
+        self.assertEqual([quote.price for quote in caught.exception.prices], [3100, 2799])
+        self.assertEqual(page.requests, [HOME, SEARCH])
 
     def test_delayed_cookie_is_waited_for_without_reloading_home(self):
         page = LocalPage()

@@ -120,7 +120,14 @@ def fetch_round_trip(crawler, fc, tc, date, ret):
                         from .ctrip_fare_details import read_details
                         diagnostics = crawler.round_trip_diagnostics
                         diagnostics["expanded_return_options"] = 0
-                        return read_details(page, quotes, check_access, diagnostics)
+                        if crawler.config.get("ctrip_keep_list_quotes") is not True:
+                            return read_details(page, quotes, check_access, diagnostics)
+                        try:
+                            detailed = read_details(page, quotes, check_access, diagnostics)
+                        except FetchFailure as failure:
+                            failure.prices = _include_list_quotes(failure.prices, quotes)
+                            raise
+                        return _include_list_quotes(detailed, quotes)
                     return quotes[:1]
                 if re.search(r"暂无.{0,8}(航班|机票)|没有.{0,8}(航班|机票)|未找到.{0,8}航班", body):
                     raise FetchFailure("empty", "explicit_no_available_round_trip")
@@ -129,6 +136,12 @@ def fetch_round_trip(crawler, fc, tc, date, ret):
                 page.wait_for_timeout(1000)
     finally:
         crawler.use_mobile = mobile
+
+
+def _include_list_quotes(detailed, listed):
+    seen = {(q.flight_no, q.return_flight_no, q.price, q.price_basis) for q in detailed}
+    return detailed + [q for q in listed[:3]
+                       if (q.flight_no, q.return_flight_no, q.price, q.price_basis) not in seen]
 
 
 class ProductParser:

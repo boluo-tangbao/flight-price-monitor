@@ -17,15 +17,15 @@ def comparison_settings(config, registry, override_platforms=None):
             raise ValueError(f"Unknown platform in the comparison list: {name!r}")
     crawler = dict(config.get("crawler") or {})
     crawler.update(settings.get("crawler") or {})
-    crawler.update(round_trip_fare_details=True, tongcheng_round_trip_fare_details=True,
+    crawler.update(round_trip_fare_details=True, ctrip_keep_list_quotes=True,
+                   tongcheng_round_trip_fare_details=True,
                    tongcheng_keep_list_quotes=True)
     return list(dict.fromkeys(selected)), crawler
 
 
 def validate_comparison_route(routes):
-    if (len(routes) != 1 or len(routes[0].dates) != 1 or len(routes[0].return_dates) != 1
-            or not routes[0].checked_baggage_required):
-        raise ValueError("Specify one round-trip itinerary with checked_baggage_required enabled")
+    if len(routes) != 1 or len(routes[0].dates) != 1 or len(routes[0].return_dates) != 1:
+        raise ValueError("Specify one round-trip itinerary with one departure date and one return date")
 
 
 def compare_round_trips(route, depart, back, results):
@@ -33,10 +33,12 @@ def compare_round_trips(route, depart, back, results):
 
     Each provider is queried for one adult in economy. An adapter must only
     mark a fare verified after confirming that scope and both baggage legs.
-    Only fares with checked baggage included in the ticket price are ranked.
+    The ticket-price ranking retains all valid rows. The strict ranking only
+    includes fares with checked baggage already included on both legs.
     """
-    ranked, pending, platforms = [], [], {}
+    ticket_prices, ranked, pending, platforms = [], [], [], {}
     for platform, result in results.items():
+        ticket_count = 0
         verified_count = pending_count = rejected_count = purchase_required_count = 0
         for quote in result.prices:
             if (not isinstance(quote, RoundTripQuote) or quote.platform != platform
@@ -50,22 +52,28 @@ def compare_round_trips(route, depart, back, results):
             if cabin and cabin != "economy":
                 rejected_count += 1
                 continue
-            if requires_baggage_purchase(quote):
-                purchase_required_count += 1
-                continue
+            purchase_required = requires_baggage_purchase(quote)
             total = (baggage_total(quote)
-                     if cabin == "economy" and quote.flight_no and quote.return_flight_no else None)
+                     if not purchase_required and cabin == "economy"
+                     and quote.flight_no and quote.return_flight_no else None)
             row = {
                 "platform": platform, "flight_no": quote.flight_no,
                 "return_flight_no": quote.return_flight_no, **round_trip_airlines(quote),
                 "ticket_price_cny": quote.price, "price_basis": quote.price_basis,
                 "checked_baggage": checked_baggage_labels(quote),
+                "checked_baggage_status": ("purchase_required" if purchase_required else
+                                            "included" if total is not None else "unverified"),
                 "fare_baggage_rule": offer.get("fare_rule"),
                 "cabin_verified": cabin == "economy",
                 "total_with_baggage_cny": total,
                 "within_budget": total <= route.alert_threshold if total is not None and route.alert_threshold else None,
                 "fetched_at": quote.fetched_at, "source_url": quote.source_url,
             }
+            ticket_prices.append(row)
+            ticket_count += 1
+            if purchase_required:
+                purchase_required_count += 1
+                continue
             if total is None:
                 pending.append(row)
                 pending_count += 1
@@ -73,12 +81,16 @@ def compare_round_trips(route, depart, back, results):
                 ranked.append(row)
                 verified_count += 1
         platforms[platform] = {"status": result.status, "evidence": result.evidence,
+                               "ticket_status": "available" if ticket_count else "unavailable",
+                               "ticket_quotes": ticket_count,
                                "verified_quotes": verified_count, "pending_quotes": pending_count,
                                "rejected_quotes": rejected_count,
                                "excluded_baggage_purchase_required": purchase_required_count}
 
     ranked.sort(key=lambda row: (row["total_with_baggage_cny"], row["platform"],
                                  row["flight_no"], row["return_flight_no"]))
+    ticket_prices.sort(key=lambda row: (row["ticket_price_cny"], row["platform"],
+                                        row["flight_no"], row["return_flight_no"]))
     pending.sort(key=lambda row: (row["ticket_price_cny"], row["platform"]))
     best_total = ranked[0]["total_with_baggage_cny"] if ranked else None
     best = [row for row in ranked if row["total_with_baggage_cny"] == best_total]
@@ -94,6 +106,7 @@ def compare_round_trips(route, depart, back, results):
         "platforms": platforms,
         "best_verified": best,
         "ranked_verified": ranked,
+        "ranked_ticket": ticket_prices,
         "pending_baggage": pending,
         "platforms_without_complete_comparison": incomplete,
         "pending_at_or_below_best_total": unresolved,

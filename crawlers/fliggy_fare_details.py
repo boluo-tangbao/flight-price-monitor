@@ -40,7 +40,7 @@ def _allowance(value):
     if re.search(r"另购|另付|需(?:加购|付费)|不包含|不免费|收费托运", value):
         return {}
     pieces = re.search(r"(?:每人可)?免费托运(?:行李)?件数\s*:\s*(\d+)\s*件", value)
-    weight = re.search(r"(?:可)?免费托运(?:的)?重量\s*:\s*(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)(\s*/\s*件)?",
+    weight = re.search(r"(?:可)?免费托运(?:的)?重量\s*:\s*(?:总重\s*)?(\d+(?:\.\d+)?)\s*(?:kg|公斤|千克)(\s*/\s*件)?",
                        value, re.I)
     count = int(pieces[1]) if pieces else 0
     kg = float(weight[1]) if weight else 0
@@ -76,24 +76,97 @@ def _adult_checked_rules(tables, city_from, city_to):
     return {leg: rule for leg, rule in rules.items() if leg not in conflicts}
 
 
+def _text_baggage_rows(text, city_from, city_to):
+    """Expand a rendered baggage grid, including its route/passenger groups."""
+    routes = {f"{city_from}-{city_to}", f"{city_to}-{city_from}"}
+    rows = []
+    direction = passenger = baggage = ""
+    values = []
+
+    def flush():
+        if direction and passenger and baggage and values:
+            rows.append((direction, passenger, baggage, "\n".join(values)))
+        values.clear()
+
+    for line in text.splitlines():
+        line = _normalize(line)
+        if not line:
+            continue
+        route = re.sub(r"[—–→至]", "-", re.sub(r"\s+", "", line))
+        if route in routes:
+            flush()
+            direction, passenger, baggage = route, "", ""
+        elif line in ("成人", "儿童", "婴儿"):
+            flush()
+            passenger, baggage = line, ""
+        elif line in ("个人物品", "手提行李", "托运行李"):
+            flush()
+            baggage = line
+        elif baggage:
+            values.append(line)
+    flush()
+    return tuple(rows)
+
+
+def _visible_baggage_rows(page, city_from, city_to):
+    tables = visible_table_rows(page)
+    # Current Fliggy tooltips render the visual table with Rax div/span nodes.
+    # Read only the active rules popup; never pool text across fare cards.
+    blocks = page.get_by_text("行李额说明", exact=True).and_(page.locator(":visible")).evaluate_all(r"""headings => headings.map(heading => {
+        let result = '';
+        for (let node = heading.parentElement; node && node !== document.body; node = node.parentElement) {
+            const text = node.innerText || '';
+            if (/退改签规则\s*及\s*行李额/.test(text)) break;
+            if (text.includes('乘客类型') && text.includes('托运行李')) result = text;
+        }
+        return result;
+    }).filter(Boolean)""")
+    if len(blocks) == 1:
+        rows = _text_baggage_rows(blocks[0], city_from, city_to)
+        if rows:
+            tables.append(rows)
+    return tables
+
+
 def check_access(page, expected_url, status=None):
     actual, expected = map(urlsplit, (page.url, expected_url))
     if status == 401 or actual.hostname in LOGIN_HOSTS:
         raise FetchFailure("login_required", "fliggy_desktop_login_required")
-    if status in (403, 429) or any(BLOCKED_PATH.search(urlsplit(frame.url).path) for frame in page.frames):
+    if status in (403, 429) or _visible_verification(page):
         raise FetchFailure("blocked", "fliggy_desktop_verification_required")
     if status is not None and status >= 400:
         raise FetchFailure("error", "fliggy_desktop_http_error")
-    required = ("tripType", "depCity", "arrCity", "depDate", "arrDate")
+    required = ("tripType", "depDate", "arrDate")
     actual_params, expected_params = map(parse_qs, (actual.query, expected.query))
+
+    def city(params, prefix):
+        values = [params[key] for key in (prefix + "City", prefix + "CityCode") if key in params]
+        return values[0] if values and all(value == values[0] for value in values) else None
+
     if ((actual.scheme, actual.hostname, actual.path) != (expected.scheme, expected.hostname, expected.path)
-            or any(actual_params.get(key) != expected_params[key] for key in required)):
+            or any(actual_params.get(key) != expected_params.get(key) for key in required)
+            or any(city(actual_params, prefix) is None or city(actual_params, prefix) != city(expected_params, prefix)
+                   for prefix in ("dep", "arr"))):
         raise FetchFailure("unverified", "fliggy_desktop_round_trip_page_not_matched")
     body = page.locator("body").inner_text(timeout=3500)
     if VERIFY_TEXT.search(body):
         raise FetchFailure("blocked", "fliggy_desktop_verification_required")
     if LOGIN_TEXT.search(body):
         raise FetchFailure("login_required", "fliggy_desktop_login_required")
+
+
+def _visible_verification(page):
+    """A completed challenge can leave its hidden iframe attached."""
+    for frame in page.frames:
+        if not BLOCKED_PATH.search(urlsplit(frame.url).path):
+            continue
+        while frame.parent_frame is not None:
+            if not frame.frame_element().is_visible():
+                break
+            frame = frame.parent_frame
+        else:
+            return True
+    return False
 
 
 def _flight_options(page, action):
@@ -163,12 +236,12 @@ def _inspect_pair(page, itinerary, flights, tax_display, links, wait, diagnostic
         legs = {}
         if time.monotonic() < deadline:
             page.mouse.move(0, 0)
-            wait(lambda: not _adult_checked_rules(visible_table_rows(page), city_from, city_to), 1)
-            baseline = Counter(visible_table_rows(page))
+            wait(lambda: not _adult_checked_rules(_visible_baggage_rows(page, city_from, city_to), city_from, city_to), 1)
+            baseline = Counter(_visible_baggage_rows(page, city_from, city_to))
 
             def read_table():
                 nonlocal legs
-                fresh = (Counter(visible_table_rows(page)) - baseline).elements()
+                fresh = (Counter(_visible_baggage_rows(page, city_from, city_to)) - baseline).elements()
                 legs = _adult_checked_rules(fresh, city_from, city_to)
                 return len(legs) == 2
 
@@ -208,8 +281,8 @@ def read_fare_details(page, itinerary, diagnostics):
             page.wait_for_timeout(200)
 
     visible = page.locator(":visible")
-    choose_out = page.get_by_text("选为去程", exact=True).and_(visible)
-    choose_in = page.get_by_text("选为返程", exact=True).and_(visible)
+    choose_out = page.get_by_role("button", name="选为去程", exact=True).and_(visible)
+    choose_in = page.get_by_role("button", name="选为返程", exact=True).and_(visible)
     reselect_out = page.get_by_text("重选去程航班", exact=True).and_(visible)
     reselect_in = page.get_by_text("重选返程航班", exact=True).and_(visible)
     tax = page.get_by_text("含税价格", exact=True).and_(visible)
@@ -236,7 +309,7 @@ def read_fare_details(page, itinerary, diagnostics):
             out = wait(lambda: _flight_options(page, choose_out).get(outward))
             if out is None:
                 continue
-            out[0].get_by_text("选为去程", exact=True).click(timeout=3500)
+            out[0].get_by_role("button", name="选为去程", exact=True).click(timeout=3500)
             if not wait(lambda: _selected_direction(reselect_out, outward, depart, "重选返程航班")):
                 break
             inbounds = wait(lambda: _flight_options(page, choose_in))
@@ -254,7 +327,7 @@ def read_fare_details(page, itinerary, diagnostics):
                 match = wait(lambda: _flight_options(page, choose_in).get(inward))
                 if match is None:
                     continue
-                match[0].get_by_text("选为返程", exact=True).click(timeout=3500)
+                match[0].get_by_role("button", name="选为返程", exact=True).click(timeout=3500)
                 if not wait(lambda: _selected_direction(reselect_in, inward, back, "重选去程航班")
                             and rules.count()):
                     continue
