@@ -5,7 +5,7 @@
 
 
 import os, sys, re, json, random, time, logging, tempfile, threading, zlib
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Optional
 from playwright.sync_api import sync_playwright, BrowserContext, Page, Response
 from .challenge import ChallengeContext, install_navigation_guard
@@ -866,7 +866,10 @@ class BaseCrawler:
                 window_front: bool = False, window_idx: int = 0,
                 save_session: Optional[str] = None):
         """启动持久化浏览器上下文。headless=None 时使用配置。"""
-        path = os.path.normcase(os.path.realpath(self.user_data_dir))
+        cloud_state = getattr(self, "cloud_storage_state", None)
+        profile = (self.user_data_dir if cloud_state is None else
+                   os.path.join(self.user_data_root, self.profile_name or self.name))
+        path = os.path.normcase(os.path.realpath(profile))
         with _PROFILE_LOCKS_GUARD:
             lock = _PROFILE_LOCKS.setdefault(path, threading.Lock())
         if not lock.acquire(blocking=False):
@@ -917,7 +920,10 @@ class BaseCrawler:
     def _browser_context(self, headless, window_front, window_idx, save_session):
         hl = self.headless if headless is None else headless
         fp = self.fingerprint()
-        with sync_playwright() as p:
+        cloud_state = getattr(self, "cloud_storage_state", None)
+        if cloud_state is not None:
+            save_session = None
+        with sync_playwright() as p, ExitStack() as browser_cleanup:
             x, y = 40 + window_idx * 170, 24 + window_idx * 150
             launch_args = [f"--window-position={x},{y}"]
             if window_front:
@@ -946,25 +952,35 @@ class BaseCrawler:
             _chan = stealth_ext.channel(self.config)
             if _chan:
                 _kw["channel"] = _chan
-            ctx = p.chromium.launch_persistent_context(
-                user_data_dir=self.user_data_dir,
-                headless=hl,
-                user_agent=fp["ua"],
-                viewport=fp["viewport"],
-                locale=fp["locale"],
-                timezone_id=fp["timezone"],
-                is_mobile=fp["is_mobile"],
-                has_touch=fp["has_touch"],
-                # 可选本地代理（r319）：全部渠道采集出口统一走它
-                proxy=({"server": fp["proxy"]} if fp["proxy"] else None),
-                args=launch_args + [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ] + (["--disable-blink-features=AutomationControlled"]
-                     if fp["stealth"] else []),
-                **_kw,
-            )
-            if fp["stealth"]:
+            if cloud_state is not None:
+                # The hosted runner can share the desktop lifecycle without
+                # importing a persistent profile or saving account data to disk.
+                browser = p.chromium.launch(headless=hl, **_kw)
+                browser_cleanup.callback(browser.close)
+                ctx = browser.new_context(storage_state=cloud_state,
+                                          viewport=fp["viewport"], locale=fp["locale"],
+                                          timezone_id=fp["timezone"],
+                                          is_mobile=fp["is_mobile"], has_touch=fp["has_touch"])
+            else:
+                ctx = p.chromium.launch_persistent_context(
+                    user_data_dir=self.user_data_dir,
+                    headless=hl,
+                    user_agent=fp["ua"],
+                    viewport=fp["viewport"],
+                    locale=fp["locale"],
+                    timezone_id=fp["timezone"],
+                    is_mobile=fp["is_mobile"],
+                    has_touch=fp["has_touch"],
+                    # 可选本地代理（r319）：全部渠道采集出口统一走它
+                    proxy=({"server": fp["proxy"]} if fp["proxy"] else None),
+                    args=launch_args + [
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                    ] + (["--disable-blink-features=AutomationControlled"]
+                         if fp["stealth"] else []),
+                    **_kw,
+                )
+            if cloud_state is None and fp["stealth"]:
                 try:
                     # 种子按 profile 固定：同一档案跨重启指纹一致（像真人），
                     # 不同档案互不相同（不把多个身份缝成同一个）
@@ -992,7 +1008,7 @@ class BaseCrawler:
             try:
                 # Chromium 重开可能丢弃 expires=-1 的会话 Cookie；快照
                 # 只补缺失/更旧的键，不覆盖档案里更新的持久 Cookie。
-                if os.path.isfile(self.session_state_path):
+                if cloud_state is None and os.path.isfile(self.session_state_path):
                     saved = self.load_session_cookies()
                     if saved:
                         plan = self._restore_plan(ctx.cookies(), saved)
@@ -1014,7 +1030,7 @@ class BaseCrawler:
                 # 采集成功后回写一次快照（沿用原 saved_at，不代表重新
                 # 登录）：否则短命会话 Cookie 只停留在登录那一刻，进程
                 # 重启后快照已过期，表现成「过一会又要登录」。
-                _refresh = self._should_refresh_snapshot(save_session)
+                _refresh = cloud_state is None and self._should_refresh_snapshot(save_session)
                 try:
                     # 登录收尾必须走合并态：用户可能是在弹窗里完成的登录，
                     # 只取主页面 storage_state 会把弹窗里的凭证漏掉。
@@ -1037,7 +1053,7 @@ class BaseCrawler:
                 # 被拒页面在关上下文前落盘：同一个采集线程、同一个 page，
                 # 是 Playwright sync 唯一安全的截图时机
                 try:
-                    if self._scene_pending:
+                    if cloud_state is None and self._scene_pending:
                         self.capture_scene(self._last_page, tag="block")
                 except Exception:
                     pass
@@ -1067,8 +1083,9 @@ class BaseCrawler:
         self._watch_retry_after(page)
         # 挑战处置接缝：导航完成后交给已注册的处理器（没注册=纯转发，
         # 行为与开销都不变）。处理器解完自行 reload，采集器照常解析。
-        install_navigation_guard(page, lambda url: ChallengeContext(
-            plat=self.name, url=url, crawler=self))
+        if getattr(self, "cloud_storage_state", None) is None:
+            install_navigation_guard(page, lambda url: ChallengeContext(
+                plat=self.name, url=url, crawler=self))
         return page
 
     retry_after_s: int = 0

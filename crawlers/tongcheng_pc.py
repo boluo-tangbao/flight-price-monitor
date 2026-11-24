@@ -19,11 +19,11 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
     def __init__(self, crawler, diagnostics=None):
         config = dict(crawler.config)
         self.cloud_storage_state = getattr(crawler, "cloud_storage_state", None)
-        if self.cloud_storage_state is not None:
-            config["slider"] = {"auto": False}
         config["user_data_dir"] = str(Path(crawler.user_data_root).resolve())
         channel = config.get("tongcheng_pc_browser_channel")
-        if channel:
+        if self.cloud_storage_state is not None:
+            config.update(slider={"auto": False}, stealth=False, headless=True, browser_channel="chromium")
+        elif channel:
             config["browser_channel"] = channel
         super().__init__(config, crawler.logger)
         self.diagnostics = diagnostics if diagnostics is not None else {}
@@ -44,14 +44,7 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
             handler.logger = self.logger
 
     def new_page(self, ctx):
-        if self.cloud_storage_state is None:
-            page = super().new_page(ctx)
-        else:
-            page = ctx.new_page()
-            page.set_default_timeout(self.timeout_ms)
-            page.set_default_navigation_timeout(self.timeout_ms)
-            self._last_page = page
-            self._watch_retry_after(page)
+        page = super().new_page(ctx)
         def count_search(request):
             target = urlsplit(request.url)
             if (request.resource_type == "document" and target.hostname == "www.ly.com"
@@ -62,15 +55,11 @@ class TongchengDesktop(InternationalRoundTrip, BaseCrawler):
 
     @contextmanager
     def browser(self, *args, **kwargs):
-        if self.cloud_storage_state is None:
-            desktop = super().browser(*args, **kwargs)
-        else:
-            from core.cloud_session import cloud_desktop
-            desktop = cloud_desktop(self.cloud_storage_state, {"width": 1366, "height": 900})
-        with desktop as ctx:
+        with super().browser(*args, **kwargs) as ctx:
             expected = getattr(self, "expected_search_url", None)
             inspect_cloud = self.cloud_storage_state is not None and expected is not None
             if inspect_cloud:
+                self.diagnostics["browser_mode"] = "upstream_lifecycle_chromium"
                 # Existence only. It does not prove that the service accepts the session.
                 try:
                     self.diagnostics["auth_cookie_in_search_context"] = any(

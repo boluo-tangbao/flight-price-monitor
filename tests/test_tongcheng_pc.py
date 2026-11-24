@@ -83,16 +83,29 @@ class UpstreamTests(unittest.TestCase):
         ctx = Mock()
         ctx.new_page.return_value = page
         ctx.cookies.return_value = [{"name": "memberIdNew", "value": "hidden-cookie"}]
-        with patch("core.cloud_session.cloud_desktop", return_value=nullcontext(ctx)):
-            with worker.browser():
+        with patch.object(browser, "sync_playwright") as pw, \
+                patch.object(browser, "install_navigation_guard") as navigation_guard:
+            engine = pw.return_value.__enter__.return_value.chromium
+            engine.launch.return_value.new_context.return_value = ctx
+            with worker.browser(save_session="login"):
                 worker.new_page(ctx)
                 req = SimpleNamespace(resource_type="document", frame=page.main_frame)
                 page.emit_response(SimpleNamespace(url=worker.expected_search_url, request=req, status=302))
                 page.url = "https://passport.ly.com/login/hidden-path?token=hidden-token"
                 page.emit_response(SimpleNamespace(url=page.url, request=req, status=200))
+            engine.launch.assert_called_once_with(headless=True, channel="chromium")
+            engine.launch_persistent_context.assert_not_called()
+            self.assertIs(engine.launch.return_value.new_context.call_args.kwargs["storage_state"],
+                          self.crawler.cloud_storage_state)
+            ctx.close.assert_called_once()
+            engine.launch.return_value.close.assert_called_once()
+            ctx.storage_state.assert_not_called()
+            navigation_guard.assert_not_called()
+        self.assertFalse((Path(self.root.name) / "tongcheng-pc").exists())
         diagnostics["detail_fare_inventory"] = [{"text": "hidden-inventory"}]
         report = cloud_report_diagnostics(diagnostics)
         self.assertTrue(report["auth_cookie_in_search_context"])
+        self.assertEqual(report["browser_mode"], "upstream_lifecycle_chromium")
         self.assertEqual([row["http"] for row in report["document_trail"]], [302, 200])
         self.assertEqual(report["final_destination"], {"host": "passport.ly.com", "path": "login_related",
                          "search_parameter": "missing", "same_search_location": False})
@@ -172,6 +185,16 @@ class UpstreamTests(unittest.TestCase):
             self.run_page(Page([response({"code": 444, "data": None})]))
         self.assertEqual(str(err.exception), "tongcheng_list_request_rejected_444")
         self.assertEqual(self.crawler.round_trip_diagnostics["list_business_codes"], [444])
+
+    def test_list_406_does_not_attempt_fare_details_or_classify_as_empty(self):
+        self.crawler.config["tongcheng_round_trip_fare_details"] = True
+        page = Page([response({}, status=406)], "同程旅行")
+        with patch("crawlers.tongcheng_fare_details.read_fare_inventory") as read, \
+                self.assertRaises(FetchFailure) as err:
+            self.run_page(page)
+        read.assert_not_called()
+        self.assertEqual((err.exception.status, str(err.exception)), ("error", "tongcheng_list_http_406"))
+        self.assertEqual(self.crawler.round_trip_searches, 1)
 
     def test_page_http_rejection_is_blocked(self):
         r = Mock(url="https://www.ly.com/iflight/book1.html", status=403)

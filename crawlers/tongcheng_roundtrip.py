@@ -42,7 +42,7 @@ def navigation_summary(current, original):
 
 
 def cloud_report_diagnostics(diagnostics):
-    keys = ("auth_cookie_in_search_context", "document_trail", "final_destination",
+    keys = ("browser_mode", "auth_cookie_in_search_context", "document_trail", "final_destination",
             "page_http_status", "list_outcome", "list_response_count", "list_http_statuses",
             "list_payload_count", "list_business_codes", "offer_rows_seen", "matched_offer_rows",
             "unrecognized_list_host_count", "search_document_requests", "detail_stage", "detail_status")
@@ -187,6 +187,8 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
         from .tongcheng_fare_details import read_fare_inventory
         def detail_reader(page):
             fallback = list(quotes.values())
+            if not fallback and diagnostics["list_http_statuses"] == [406]:
+                raise FetchFailure("error", "tongcheng_list_http_406")
 
             def check_detail_access(current_url, text, status=None):
                 check_access(current_url, text, status or diagnostics.get('page_http_status'))
@@ -240,6 +242,8 @@ def fetch_round_trip(crawler, origin, destination, depart, back):
         return sorted(quotes.values(), key=lambda quote: quote.price)[:3]
     if worker.last_outcome == "empty":
         raise FetchFailure("empty", "tongcheng_explicit_no_flights")
+    if diagnostics["list_http_statuses"] == [406]:
+        raise FetchFailure("error", "tongcheng_list_http_406")
     if not diagnostics["list_response_count"]:
         raise FetchFailure("parse_error", "tongcheng_no_list_response")
     if not diagnostics["list_payload_count"]:

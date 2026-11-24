@@ -49,6 +49,10 @@ python main.py -c config.monitor.yaml --compare
    这次只读同程，会在 `comparison.json` 的 `platforms.tongcheng.diagnostics` 记录浏览器内是否有
    同程已知的登录 Cookie（只有存在性，不代表服务器接受登录）、导航状态码、页面归类、行程参数状态及报价响应计数。
    第三方地址和未识别路径只记录类别。报告不含页面正文、原始查询参数或 Cookie 值。
+   同程云端沿用原版桌面浏览器的初始化、页面超时和关闭流程，使用 Playwright 的完整 Chromium
+   无头通道。通过 Secret 在临时会话里恢复登录态，不读取或保存本地浏览器档案，不自动处理验证。
+   往返取价与托运仍走本项目的校验。如果报价接口只返回 HTTP 406，直接报告 `tongcheng_list_http_406`，
+   不继续进详情，也不把接口拒绝报成无票。
 
 3. 验收后，在仓库 Settings → Secrets and variables → Actions → Variables 添加
    `FLIGHT_MONITOR_COMPARISON_ENABLED=true`，并保持 `FLIGHT_MONITOR_ENABLED=true`。
